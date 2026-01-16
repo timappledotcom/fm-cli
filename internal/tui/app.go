@@ -68,9 +68,13 @@ var (
 // msg types
 type mailboxesLoadedMsg []model.Mailbox
 type emailsLoadedMsg []model.Email
+type emailsRefreshedMsg []model.Email // For refresh without appending
 type emailBodyLoadedMsg string
 type editorFinishedMsg struct{ err error }
 type emailSentMsg struct{}
+type draftSavedMsg struct{}
+type emailDeletedMsg struct{}
+type identitiesLoadedMsg []string
 type errorMsg error
 
 // Model implementation
@@ -85,6 +89,7 @@ type Model struct {
 	// Email View Data
 	emails      []model.Email
 	emailCursor int
+	emailOffset int
 	loading     bool
 	canLoadMore bool // If true, hitting bottom loads more
 
@@ -97,6 +102,9 @@ type Model struct {
 	inputSubject textinput.Model
 	composeBody  string
 	tempFile     string
+	draftID      string   // If editing a draft
+	identities   []string // Available sending identities (email addresses)
+	identityIdx  int      // Currently selected identity index
 
 	err    error
 	width  int
@@ -121,11 +129,93 @@ func NewModel(client *api.Client) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return fetchMailboxesCmd(m.client)
+	return tea.Batch(fetchMailboxesCmd(m.client), fetchIdentitiesCmd(m.client))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
+	// Global / Async Message Handling (Higher Priority)
+	switch msg := msg.(type) {
+	case editorFinishedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		content, err := ioutil.ReadFile(m.tempFile)
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.composeBody = string(content)
+		m.state = viewComposeConfirm
+		return m, nil
+
+	case mailboxesLoadedMsg:
+		m.mailboxes = msg
+		m.loading = false
+		return m, nil
+
+	case emailsLoadedMsg:
+		newEmails := []model.Email(msg)
+		if len(newEmails) < 20 {
+			m.canLoadMore = false
+		} else {
+			m.canLoadMore = true
+		}
+		m.emails = append(m.emails, newEmails...)
+		m.loading = false
+		return m, nil
+
+	case emailsRefreshedMsg:
+		// Replace emails instead of appending (for refresh)
+		m.emails = []model.Email(msg)
+		m.emailOffset = 0
+		m.emailCursor = 0
+		if len(m.emails) < 20 {
+			m.canLoadMore = false
+		} else {
+			m.canLoadMore = true
+		}
+		m.loading = false
+		return m, nil
+
+	case emailBodyLoadedMsg:
+		m.bodyContent = string(msg)
+		m.loading = false
+		return m, nil
+
+	case identitiesLoadedMsg:
+		m.identities = msg
+		return m, nil
+
+	case draftSavedMsg:
+		m.loading = false
+		m.state = viewMailboxes
+		os.Remove(m.tempFile)
+		return m, fetchMailboxesCmd(m.client)
+
+	case emailSentMsg:
+		m.loading = false
+		m.state = viewMailboxes
+		os.Remove(m.tempFile)
+		return m, fetchMailboxesCmd(m.client)
+
+	case emailDeletedMsg:
+		m.loading = false
+		// Refresh mailbox counts after delete
+		return m, fetchMailboxesCmd(m.client)
+
+	case errorMsg:
+		m.err = msg
+		m.loading = false
+		return m, nil
+	
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		// Don't return, let UI resize if needed (though mostly static)
+	}
 
 	// Handle Composition States
 	if m.state == viewComposeTo {
@@ -139,6 +229,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputTo.Blur()
 				m.inputSubject.Focus()
 				return m, textinput.Blink
+			case tea.KeyTab:
+				if len(m.identities) > 1 {
+					m.identityIdx = (m.identityIdx + 1) % len(m.identities)
+				}
+				return m, nil
 			case tea.KeyEsc:
 				m.state = viewMailboxes
 				m.inputTo.Blur()
@@ -164,6 +259,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.err = err
 					return m, nil
 				}
+				
+				// Write existing body content to file if available
+				if m.composeBody != "" {
+					if _, err := f.WriteString(m.composeBody); err != nil {
+						f.Close()
+						m.err = err
+						return m, nil
+					}
+				}
+				
 				m.tempFile = f.Name()
 				f.Close()
 
@@ -175,6 +280,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.ExecProcess(c, func(err error) tea.Msg {
 					return editorFinishedMsg{err}
 				})
+			case tea.KeyTab:
+				if len(m.identities) > 1 {
+					m.identityIdx = (m.identityIdx + 1) % len(m.identities)
+				}
+				return m, nil
 			case tea.KeyEsc:
 				m.state = viewComposeTo
 				m.inputSubject.Blur()
@@ -193,7 +303,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				m.loading = true
-				return m, sendEmailCmd(m.client, m.inputTo.Value(), m.inputSubject.Value(), m.composeBody)
+				fromAddr := ""
+				if len(m.identities) > 0 {
+					fromAddr = m.identities[m.identityIdx]
+				}
+				return m, sendEmailCmd(m.client, m.draftID, fromAddr, m.inputTo.Value(), m.inputSubject.Value(), m.composeBody)
+			case "s", "S":
+				m.loading = true
+				fromAddr := ""
+				if len(m.identities) > 0 {
+					fromAddr = m.identities[m.identityIdx]
+				}
+				return m, saveDraftCmd(m.client, m.draftID, fromAddr, m.inputTo.Value(), m.inputSubject.Value(), m.composeBody)
 			case "n", "N":
 				m.state = viewMailboxes
 				m.composeBody = ""
@@ -208,6 +329,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.ExecProcess(c, func(err error) tea.Msg {
 					return editorFinishedMsg{err}
 				})
+			case "tab":
+				if len(m.identities) > 1 {
+					m.identityIdx = (m.identityIdx + 1) % len(m.identities)
+				}
+				return m, nil
 			case "ctrl+c":
 				return m, tea.Quit
 			}
@@ -222,12 +348,180 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 
+		case "d", "backspace":
+			if m.state == viewEmails && len(m.emails) > 0 {
+				m.loading = true
+				selectedEmail := m.emails[m.emailCursor]
+				// Optimistic UI update
+				if m.emailCursor < len(m.emails)-1 {
+					m.emails = append(m.emails[:m.emailCursor], m.emails[m.emailCursor+1:]...)
+				} else {
+					m.emails = m.emails[:m.emailCursor]
+					if m.emailCursor > 0 {
+						m.emailCursor--
+					}
+				}
+				return m, deleteEmailCmd(m.client, selectedEmail.ID)
+			}
+
+		case "u":
+			if m.state == viewEmails && len(m.emails) > 0 {
+				selectedEmail := m.emails[m.emailCursor]
+				newState := !selectedEmail.IsUnread
+				m.emails[m.emailCursor].IsUnread = newState
+				return m, toggleUnreadCmd(m.client, selectedEmail.ID, newState)
+			}
+
+		case "f":
+			if m.state == viewEmails && len(m.emails) > 0 {
+				selectedEmail := m.emails[m.emailCursor]
+				newState := !selectedEmail.IsFlagged
+				m.emails[m.emailCursor].IsFlagged = newState
+				return m, toggleFlaggedCmd(m.client, selectedEmail.ID, newState)
+			}
+		
+		case "e":
+			if m.state == viewEmails && len(m.emails) > 0 {
+				targetMBID := ""
+				// Find Archive Mailbox ID
+				for _, mb := range m.mailboxes {
+					if mb.Role == "archive" {
+						targetMBID = mb.ID
+						break
+					}
+				}
+
+				if targetMBID != "" {
+					m.loading = true
+					selectedEmail := m.emails[m.emailCursor]
+					currentMBID := m.mailboxes[m.mbCursor].ID
+					
+					// Optimistic UI update
+					if m.emailCursor < len(m.emails)-1 {
+						m.emails = append(m.emails[:m.emailCursor], m.emails[m.emailCursor+1:]...)
+					} else {
+						m.emails = m.emails[:m.emailCursor]
+						if m.emailCursor > 0 {
+							m.emailCursor--
+						}
+					}
+					
+					return m, moveEmailCmd(m.client, selectedEmail.ID, currentMBID, targetMBID)
+				}
+			} else if m.state == viewBody {
+				// If viewing a draft, 'e' edits it
+				if len(m.emails) > m.emailCursor {
+					selectedEmail := m.emails[m.emailCursor]
+					if selectedEmail.IsDraft {
+						m.state = viewComposeTo
+						m.draftID = selectedEmail.ID
+						m.inputTo.SetValue(selectedEmail.To)
+						m.inputSubject.SetValue(selectedEmail.Subject)
+						
+						// Prepare body
+						body := m.bodyContent
+						if strings.HasPrefix(body, "[Converted HTML]\n") {
+							body = strings.TrimPrefix(body, "[Converted HTML]\n")
+						}
+						m.composeBody = body
+						
+						// Determine focus
+						if m.inputTo.Value() == "" {
+							m.state = viewComposeTo
+							m.inputTo.Focus()
+						} else {
+							m.state = viewComposeSubject
+							m.inputTo.Blur()
+							m.inputSubject.Focus()
+						}
+						return m, textinput.Blink
+					}
+				}
+			}
+
 		case "c":
 			m.state = viewComposeTo
+			m.draftID = "" // New email
 			m.inputTo.SetValue("")
 			m.inputSubject.SetValue("")
+			m.composeBody = ""
 			m.inputTo.Focus()
 			return m, textinput.Blink
+
+		case "R": // Reply to sender
+			if m.state == viewBody && len(m.emails) > 0 {
+				selectedEmail := m.emails[m.emailCursor]
+				m.state = viewComposeTo
+				m.draftID = ""
+				// Use ReplyTo if available, otherwise From
+				replyTo := selectedEmail.From
+				if selectedEmail.ReplyTo != "" {
+					replyTo = selectedEmail.ReplyTo
+				}
+				m.inputTo.SetValue(replyTo)
+				// Add Re: prefix if not already present
+				subject := selectedEmail.Subject
+				if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+					subject = "Re: " + subject
+				}
+				m.inputSubject.SetValue(subject)
+				// Quote original message
+				m.composeBody = fmt.Sprintf("\n\n--- Original Message ---\nFrom: %s\nDate: %s\nSubject: %s\n\n%s",
+					selectedEmail.From, selectedEmail.Date, selectedEmail.Subject, m.bodyContent)
+				m.inputTo.Focus()
+				return m, textinput.Blink
+			}
+
+		case "A": // Reply all
+			if m.state == viewBody && len(m.emails) > 0 {
+				selectedEmail := m.emails[m.emailCursor]
+				m.state = viewComposeTo
+				m.draftID = ""
+				// Combine From (or ReplyTo), To, and Cc for reply-all
+				var recipients []string
+				replyTo := selectedEmail.From
+				if selectedEmail.ReplyTo != "" {
+					replyTo = selectedEmail.ReplyTo
+				}
+				recipients = append(recipients, replyTo)
+				if selectedEmail.To != "" {
+					recipients = append(recipients, selectedEmail.To)
+				}
+				if selectedEmail.Cc != "" {
+					recipients = append(recipients, selectedEmail.Cc)
+				}
+				m.inputTo.SetValue(strings.Join(recipients, ", "))
+				// Add Re: prefix if not already present
+				subject := selectedEmail.Subject
+				if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+					subject = "Re: " + subject
+				}
+				m.inputSubject.SetValue(subject)
+				// Quote original message
+				m.composeBody = fmt.Sprintf("\n\n--- Original Message ---\nFrom: %s\nDate: %s\nSubject: %s\n\n%s",
+					selectedEmail.From, selectedEmail.Date, selectedEmail.Subject, m.bodyContent)
+				m.inputTo.Focus()
+				return m, textinput.Blink
+			}
+
+		case "F": // Forward
+			if m.state == viewBody && len(m.emails) > 0 {
+				selectedEmail := m.emails[m.emailCursor]
+				m.state = viewComposeTo
+				m.draftID = ""
+				m.inputTo.SetValue("") // User needs to enter recipient
+				// Add Fwd: prefix if not already present
+				subject := selectedEmail.Subject
+				if !strings.HasPrefix(strings.ToLower(subject), "fwd:") && !strings.HasPrefix(strings.ToLower(subject), "fw:") {
+					subject = "Fwd: " + subject
+				}
+				m.inputSubject.SetValue(subject)
+				// Include forwarded message
+				m.composeBody = fmt.Sprintf("\n\n--- Forwarded Message ---\nFrom: %s\nTo: %s\nDate: %s\nSubject: %s\n\n%s",
+					selectedEmail.From, selectedEmail.To, selectedEmail.Date, selectedEmail.Subject, m.bodyContent)
+				m.inputTo.Focus()
+				return m, textinput.Blink
+			}
 
 		case "m":
 			if m.state == viewBody {
@@ -243,6 +537,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.state == viewEmails {
 				if m.emailCursor > 0 {
 					m.emailCursor--
+					if m.emailCursor < m.emailOffset {
+						m.emailOffset = m.emailCursor
+					}
 				}
 			}
 
@@ -252,8 +549,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.mbCursor++
 				}
 			} else if m.state == viewEmails {
+				// Dynamic page height
+				headerHeight := 5
+				footerHeight := 2
+				pageHeight := m.height - headerHeight - footerHeight
+				if pageHeight < 5 {
+					pageHeight = 5
+				}
+
 				if m.emailCursor < len(m.emails)-1 {
 					m.emailCursor++
+					if m.emailCursor >= m.emailOffset+pageHeight {
+						m.emailOffset++
+					}
 				} else if m.canLoadMore && !m.loading {
 					m.loading = true
 					selectedMB := m.mailboxes[m.mbCursor]
@@ -265,12 +573,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == viewMailboxes && len(m.mailboxes) > 0 {
 				m.state = viewEmails
 				m.emailCursor = 0 // reset cursor
+				m.emailOffset = 0 // reset offset
 				m.emails = nil    // clear previous
 				m.loading = true
 				m.canLoadMore = true
 				selectedMB := m.mailboxes[m.mbCursor]
 				return m, fetchEmailsCmd(m.client, selectedMB.ID, 0)
 			} else if m.state == viewEmails && len(m.emails) > 0 {
+				// Always go to preview first, even for drafts
 				m.state = viewBody
 				m.loading = true
 				selectedEmail := m.emails[m.emailCursor]
@@ -281,9 +591,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == viewEmails {
 				m.state = viewMailboxes
 				m.emails = nil
+				// Refresh mailbox counts when returning
+				return m, fetchMailboxesCmd(m.client)
 			} else if m.state == viewBody {
 				m.state = viewEmails
 				m.bodyContent = ""
+			}
+
+		case "r":
+			// Manual refresh
+			if m.state == viewMailboxes {
+				m.loading = true
+				return m, fetchMailboxesCmd(m.client)
+			} else if m.state == viewEmails && len(m.mailboxes) > 0 {
+				m.loading = true
+				selectedMB := m.mailboxes[m.mbCursor]
+				return m, tea.Batch(fetchMailboxesCmd(m.client), refreshEmailsCmd(m.client, selectedMB.ID))
 			}
 		}
 
@@ -308,6 +631,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case emailBodyLoadedMsg:
 		m.bodyContent = string(msg)
 		m.loading = false
+		
+		// If we are loading a draft to edit:
+		if m.draftID != "" && (m.state == viewComposeTo || m.state == viewEmails) {
+			// We came here from selecting a draft
+			// Clean up "To" field (remove Name <Email> format to just Email if possible, or leave it)
+			// JMAP usually handles Name <Email> in To field ok on sending? 
+			// Actually our SendEmail uses Email struct which parses it or expects raw.
+			// Ideally we should parse it. For now, leave as is.
+			
+			// Clean body: Remove [Converted HTML] header if present?
+			// Since we want to edit the raw text.
+			// The fetchEmailBody returns converted text.
+			// Ideally we want raw textBody from API.
+			// Current API `FetchEmailBody` tries text then html->text.
+			body := string(msg)
+			if strings.HasPrefix(body, "[Converted HTML]\n") {
+				body = strings.TrimPrefix(body, "[Converted HTML]\n")
+			}
+			m.composeBody = body
+			
+			// Determine where to focus
+			if m.inputTo.Value() == "" {
+				m.state = viewComposeTo
+				m.inputTo.Focus()
+			} else {
+				m.state = viewComposeSubject
+				m.inputTo.Blur()
+				m.inputSubject.Focus()
+			}
+		}
 
 	case editorFinishedMsg:
 		if msg.err != nil {
@@ -321,13 +674,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.composeBody = string(content)
 		m.state = viewComposeConfirm
-		// Hack to force repaint or ensure we are not in editor
-		return m, tea.EnterAltScreen
+		return m, nil
 
-	case emailSentMsg:
+	case emailDeletedMsg:
 		m.loading = false
-		m.state = viewMailboxes
-		os.Remove(m.tempFile)
 		return m, nil
 
 	case errorMsg:
@@ -405,7 +755,7 @@ func (m Model) View() string {
 			label := fmt.Sprintf("%s %s (%d)", cursor, mb.Name, mb.UnreadCount)
 			s.WriteString(style.Render(label) + "\n")
 		}
-		s.WriteString("\n(j/k navigate, enter/l open)")
+		s.WriteString("\n(j/k navigate, enter/l open, r: refresh, c: compose)")
 
 	} else if m.state == viewEmails {
 		if m.loading {
@@ -414,13 +764,20 @@ func (m Model) View() string {
 			s.WriteString("No emails found.")
 		} else {
 			// Basic Render Loop for Emails
-			// In a real app we would use bubbles/list with pagination
-			limit := 20
-			if limit > len(m.emails) {
-				limit = len(m.emails)
+			headerHeight := 5
+			footerHeight := 2
+			pageHeight := m.height - headerHeight - footerHeight
+			if pageHeight < 5 {
+				pageHeight = 5
 			}
 
-			for i := 0; i < limit; i++ {
+			start := m.emailOffset
+			end := start + pageHeight
+			if end > len(m.emails) {
+				end = len(m.emails)
+			}
+
+			for i := start; i < end; i++ {
 				e := m.emails[i]
 				style := emailItemStyle
 				if i == m.emailCursor {
@@ -431,9 +788,14 @@ func (m Model) View() string {
 				if e.IsUnread {
 					unreadMarker = "*"
 				}
+				
+				flagMarker := " "
+				if e.IsFlagged {
+					flagMarker = "!"
+				}
 
-				// Format: * [Date] From: Subject
-				line := fmt.Sprintf("%s [%s] %-20s %s", unreadMarker, e.Date, e.From, e.Subject)
+				// Format: * ! [Date] From: Subject
+				line := fmt.Sprintf("%s%s [%s] %-20s %s", unreadMarker, flagMarker, e.Date, e.From, e.Subject)
 
 				if e.IsUnread {
 					line = unreadStyle.Render(line)
@@ -442,7 +804,7 @@ func (m Model) View() string {
 				s.WriteString(style.Render(line) + "\n")
 			}
 		}
-		s.WriteString("\n(h/esc back, j/k navigate)")
+		s.WriteString("\n(h/esc back, j/k navigate, r: refresh, u: read/unread, f: flag, e: archive, d: delete, c: compose)")
 	
 	} else if m.state == viewBody {
 		if m.loading {
@@ -476,21 +838,41 @@ func (m Model) View() string {
 				s.WriteString(content)
 			}
 		}
-		s.WriteString("\n\n(h/esc: back, m: toggle details)")
+		
+		help := "\n\n(h/esc: back, R: reply, A: reply all, F: forward, m: toggle details)"
+		if len(m.emails) > m.emailCursor && m.emails[m.emailCursor].IsDraft {
+			help = "\n\n(h/esc: back, e: edit draft, m: toggle details)"
+		}
+		s.WriteString(help)
 
 	} else if m.state == viewComposeTo {
 		s.WriteString("Compose New Email\n\n")
+		fromAddr := "(loading...)"
+		if len(m.identities) > 0 {
+			fromAddr = m.identities[m.identityIdx]
+		}
+		s.WriteString("From: " + fromAddr + "  [Tab to change]\n")
 		s.WriteString("To: " + m.inputTo.View() + "\n")
-		s.WriteString("\n(Enter to continue, Esc to cancel)")
+		s.WriteString("\n(Enter to continue, Tab to cycle From, Esc to cancel)")
 
 	} else if m.state == viewComposeSubject {
 		s.WriteString("Compose New Email\n\n")
+		fromAddr := ""
+		if len(m.identities) > 0 {
+			fromAddr = m.identities[m.identityIdx]
+		}
+		s.WriteString("From: " + fromAddr + "\n")
 		s.WriteString("To: " + m.inputTo.Value() + "\n")
 		s.WriteString("Subject: " + m.inputSubject.View() + "\n")
-		s.WriteString("\n(Enter to write body in $EDITOR, Esc to back)")
+		s.WriteString("\n(Enter to write body in $EDITOR, Tab to cycle From, Esc to back)")
 
 	} else if m.state == viewComposeConfirm {
 		s.WriteString("Confirm Send?\n\n")
+		fromAddr := ""
+		if len(m.identities) > 0 {
+			fromAddr = m.identities[m.identityIdx]
+		}
+		s.WriteString("From: " + fromAddr + "\n")
 		s.WriteString("To: " + m.inputTo.Value() + "\n")
 		s.WriteString("Subject: " + m.inputSubject.Value() + "\n")
 		s.WriteString("Body Preview:\n")
@@ -504,7 +886,7 @@ func (m Model) View() string {
 		if m.loading {
 			s.WriteString("\nSENDING...\n")
 		} else {
-			s.WriteString("\n(y) Send  (n) Cancel  (e) Edit Body")
+			s.WriteString("\n(y) Send  (s) Save Draft  (n) Cancel  (e) Edit Body  (Tab) Change From")
 		}
 	}
 
@@ -512,37 +894,63 @@ func (m Model) View() string {
 }
 
 // Commands
-func sendEmailCmd(client *api.Client, to, subject, body string) tea.Cmd {
+func saveDraftCmd(client *api.Client, draftID, from, to, subject, body string) tea.Cmd {
 	return func() tea.Msg {
-		// Hardcoded "From" for now? Or fetch identity?
-		// Client doesn't store "From". 
-		// We'll use the Username used in login? 
-		// We don't have it easily available here...
-		// For now, let's assume the user enters it, OR we fetch identity.
-		// WAIT: The user didn't enter "From".
-		// We can get the Primary Identity from JMAP "Identity/get".
-		// But I haven't implemented that.
-		// Hack: use the "To" address as "From" if testing, or just try to find a valid From.
-		// Actually, JMAP server often infers From if missing or matches auth.
-		// Or I can use 'client.GetDefaultIdentity()'.
-		// I'll try to find a default identity.
-		// For now, let's just use a placeholder or ask Client to handle it.
-		// I'll modify SendEmail to create a "From" if I can, or Client has `Session`.
-		// But Client struct in `internal/api/jmap.go` exposes `Client *jmap.Client`.
-		// `jmap.Client` has `Session` which has `PrimaryAccounts`.
-		// But finding the email address... `Session.Accounts`...
-		
-		// Let's fallback to a simpler approach: 
-		// Use a hardcoded "me" or similar, relying on Server default?
-		// No, `SendEmail` in API requires `from`.
-		// I will update `SendEmail` to fetch identity if `from` is empty.
-		
-		// For the TUI, I will pass empty "from" and let API handle it.
-		err := client.SendEmail("", to, subject, body)
+		err := client.SaveDraft(draftID, from, to, subject, body)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return draftSavedMsg{}
+	}
+}
+
+func sendEmailCmd(client *api.Client, draftID, from, to, subject, body string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.SendEmail(draftID, from, to, subject, body)
 		if err != nil {
 			return errorMsg(err)
 		}
 		return emailSentMsg{}
+	}
+}
+
+func moveEmailCmd(client *api.Client, emailID, fromMBID, toMBID string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.MoveEmail(emailID, fromMBID, toMBID)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return emailDeletedMsg{} // Reuse deleted msg to clear loading state
+	}
+}
+
+func deleteEmailCmd(client *api.Client, emailID string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.DeleteEmail(emailID)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return emailDeletedMsg{}
+	}
+}
+
+func toggleUnreadCmd(client *api.Client, emailID string, isUnread bool) tea.Cmd {
+	return func() tea.Msg {
+		err := client.SetUnread(emailID, isUnread)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return nil
+	}
+}
+
+func toggleFlaggedCmd(client *api.Client, emailID string, isFlagged bool) tea.Cmd {
+	return func() tea.Msg {
+		err := client.SetFlagged(emailID, isFlagged)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return nil
 	}
 }
 
@@ -556,6 +964,20 @@ func fetchMailboxesCmd(client *api.Client) tea.Cmd {
 	}
 }
 
+func fetchIdentitiesCmd(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		identities, err := client.GetIdentities()
+		if err != nil {
+			return errorMsg(err)
+		}
+		var emails []string
+		for _, id := range identities {
+			emails = append(emails, id.Email)
+		}
+		return identitiesLoadedMsg(emails)
+	}
+}
+
 func fetchEmailsCmd(client *api.Client, mailboxID string, offset int) tea.Cmd {
 	return func() tea.Msg {
 		emails, err := client.FetchEmails(mailboxID, offset)
@@ -563,6 +985,16 @@ func fetchEmailsCmd(client *api.Client, mailboxID string, offset int) tea.Cmd {
 			return errorMsg(err)
 		}
 		return emailsLoadedMsg(emails)
+	}
+}
+
+func refreshEmailsCmd(client *api.Client, mailboxID string) tea.Cmd {
+	return func() tea.Msg {
+		emails, err := client.FetchEmails(mailboxID, 0)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return emailsRefreshedMsg(emails)
 	}
 }
 

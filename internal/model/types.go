@@ -28,6 +28,8 @@ type Email struct {
 	Preview    string
 	Date       string
 	IsUnread   bool
+	IsFlagged  bool
+	IsDraft    bool
 	ThreadID   string
 	MailboxIDs []string
 	Body       string
