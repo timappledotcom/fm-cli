@@ -89,6 +89,14 @@ type emailSentMsg struct{}
 type draftSavedMsg struct{}
 type emailDeletedMsg struct{}
 type identitiesLoadedMsg []string
+type calendarsLoadedMsg []model.Calendar
+type eventsLoadedMsg []model.CalendarEvent
+type addressBooksLoadedMsg []model.AddressBook
+type contactsLoadedMsg []model.Contact
+type eventCreatedMsg struct{}
+type eventDeletedMsg struct{}
+type contactCreatedMsg struct{}
+type contactDeletedMsg struct{}
 type errorMsg error
 
 // Main menu items
@@ -135,6 +143,27 @@ type Model struct {
 	identities   []string // Available sending identities (email addresses)
 	identityIdx  int      // Currently selected identity index
 
+	// Calendar Data
+	calendars       []model.Calendar
+	calendarCursor  int
+	events          []model.CalendarEvent
+	eventCursor     int
+	agendaStart     time.Time // Start of agenda view (usually today)
+	agendaDays      int       // Number of days to show (default 7)
+	viewEventDetail bool      // Viewing event details
+	editingEvent    *model.CalendarEvent // Event being created/edited
+	eventInput      textinput.Model
+
+	// Contacts Data
+	addressBooks      []model.AddressBook
+	addressBookCursor int
+	contacts          []model.Contact
+	contactCursor     int
+	viewContactDetail bool       // Viewing contact details
+	editingContact    *model.Contact // Contact being created/edited
+	contactInput      textinput.Model
+	contactEditField  int // Which field is being edited
+
 	// Settings
 	settingsCursor int
 
@@ -155,6 +184,12 @@ func NewModelWithStorage(client *api.Client, db *storage.DB, offlineMode bool) M
 	tiSubj := textinput.New()
 	tiSubj.Placeholder = "Subject"
 
+	tiEvent := textinput.New()
+	tiEvent.Placeholder = "Event title"
+
+	tiContact := textinput.New()
+	tiContact.Placeholder = "Contact name"
+
 	return Model{
 		client:       client,
 		db:           db,
@@ -162,7 +197,11 @@ func NewModelWithStorage(client *api.Client, db *storage.DB, offlineMode bool) M
 		state:        viewMainMenu,
 		inputTo:      tiTo,
 		inputSubject: tiSubj,
+		eventInput:   tiEvent,
+		contactInput: tiContact,
 		loading:      false,
+		agendaStart:  time.Now().Truncate(24 * time.Hour),
+		agendaDays:   14,
 	}
 }
 
@@ -248,6 +287,110 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Refresh mailbox counts after delete
 		return m, fetchMailboxesCmd(m.client, m.db)
 
+	case calendarsLoadedMsg:
+		m.calendars = msg
+		m.loading = false
+		// Auto-fetch events for visible calendars
+		if len(m.calendars) > 0 && m.client != nil {
+			var calIDs []string
+			for _, cal := range m.calendars {
+				if cal.IsVisible && cal.MayReadItems {
+					calIDs = append(calIDs, cal.ID)
+				}
+			}
+			if len(calIDs) > 0 {
+				return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+			}
+		}
+		return m, nil
+
+	case eventsLoadedMsg:
+		m.events = msg
+		m.loading = false
+		return m, nil
+
+	case addressBooksLoadedMsg:
+		m.addressBooks = msg
+		m.loading = false
+		// Auto-fetch contacts for default address book
+		if len(m.addressBooks) > 0 && m.client != nil {
+			defaultAB := ""
+			for _, ab := range m.addressBooks {
+				if ab.IsDefault && ab.MayReadItems {
+					defaultAB = ab.ID
+					break
+				}
+			}
+			if defaultAB == "" && len(m.addressBooks) > 0 && m.addressBooks[0].MayReadItems {
+				defaultAB = m.addressBooks[0].ID
+			}
+			if defaultAB != "" {
+				return m, fetchContactsCmd(m.client, defaultAB, "", 100)
+			}
+		}
+		return m, nil
+
+	case contactsLoadedMsg:
+		m.contacts = msg
+		m.loading = false
+		return m, nil
+
+	case eventCreatedMsg:
+		m.editingEvent = nil
+		m.loading = false
+		// Refresh events
+		if len(m.calendars) > 0 && m.client != nil {
+			var calIDs []string
+			for _, cal := range m.calendars {
+				if cal.IsVisible && cal.MayReadItems {
+					calIDs = append(calIDs, cal.ID)
+				}
+			}
+			return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+		}
+		return m, nil
+
+	case eventDeletedMsg:
+		m.loading = false
+		m.viewEventDetail = false
+		// Refresh events
+		if len(m.calendars) > 0 && m.client != nil {
+			var calIDs []string
+			for _, cal := range m.calendars {
+				if cal.IsVisible && cal.MayReadItems {
+					calIDs = append(calIDs, cal.ID)
+				}
+			}
+			return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+		}
+		return m, nil
+
+	case contactCreatedMsg:
+		m.editingContact = nil
+		m.loading = false
+		// Refresh contacts
+		if len(m.addressBooks) > 0 && m.client != nil {
+			abID := ""
+			if m.addressBookCursor < len(m.addressBooks) {
+				abID = m.addressBooks[m.addressBookCursor].ID
+			}
+			return m, fetchContactsCmd(m.client, abID, "", 100)
+		}
+		return m, nil
+
+	case contactDeletedMsg:
+		m.loading = false
+		m.viewContactDetail = false
+		// Refresh contacts
+		if len(m.addressBooks) > 0 && m.client != nil {
+			abID := ""
+			if m.addressBookCursor < len(m.addressBooks) {
+				abID = m.addressBooks[m.addressBookCursor].ID
+			}
+			return m, fetchContactsCmd(m.client, abID, "", 100)
+		}
+		return m, nil
+
 	case errorMsg:
 		m.err = msg
 		m.loading = false
@@ -257,6 +400,147 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		// Don't return, let UI resize if needed (though mostly static)
+	}
+
+	// Handle Calendar Event Editing
+	if m.state == viewCalendar && m.editingEvent != nil {
+		m.eventInput, cmd = m.eventInput.Update(msg)
+		
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyEnter:
+				// Save the event
+				m.editingEvent.Title = m.eventInput.Value()
+				if m.editingEvent.Title == "" {
+					m.err = fmt.Errorf("event title cannot be empty")
+					return m, nil
+				}
+				if m.editingEvent.Duration == "" {
+					m.editingEvent.Duration = "PT1H"
+				}
+				m.loading = true
+				if m.editingEvent.ID == "" {
+					return m, createEventCmd(m.client, *m.editingEvent)
+				}
+				return m, updateEventCmd(m.client, *m.editingEvent)
+			case tea.KeyEsc:
+				m.editingEvent = nil
+				m.eventInput.Blur()
+				return m, nil
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			}
+		}
+		return m, cmd
+	}
+
+	// Handle Contact Editing
+	if m.state == viewContacts && m.editingContact != nil {
+		m.contactInput, cmd = m.contactInput.Update(msg)
+		
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyTab:
+				// Save current field and move to next
+				switch m.contactEditField {
+				case 0: // Full Name
+					m.editingContact.FullName = m.contactInput.Value()
+				case 1: // Email
+					if m.contactInput.Value() != "" {
+						if len(m.editingContact.Emails) == 0 {
+							m.editingContact.Emails = []model.ContactEmail{{Type: "home"}}
+						}
+						m.editingContact.Emails[0].Email = m.contactInput.Value()
+					}
+				case 2: // Phone
+					if m.contactInput.Value() != "" {
+						if len(m.editingContact.Phones) == 0 {
+							m.editingContact.Phones = []model.ContactPhone{{Type: "mobile"}}
+						}
+						m.editingContact.Phones[0].Number = m.contactInput.Value()
+					}
+				case 3: // Company
+					m.editingContact.Company = m.contactInput.Value()
+				case 4: // Notes
+					m.editingContact.Notes = m.contactInput.Value()
+				}
+				
+				// Move to next field
+				m.contactEditField = (m.contactEditField + 1) % 5
+				
+				// Set input value for new field
+				switch m.contactEditField {
+				case 0:
+					m.contactInput.SetValue(m.editingContact.FullName)
+					m.contactInput.Placeholder = "Full Name"
+				case 1:
+					email := ""
+					if len(m.editingContact.Emails) > 0 {
+						email = m.editingContact.Emails[0].Email
+					}
+					m.contactInput.SetValue(email)
+					m.contactInput.Placeholder = "Email"
+				case 2:
+					phone := ""
+					if len(m.editingContact.Phones) > 0 {
+						phone = m.editingContact.Phones[0].Number
+					}
+					m.contactInput.SetValue(phone)
+					m.contactInput.Placeholder = "Phone"
+				case 3:
+					m.contactInput.SetValue(m.editingContact.Company)
+					m.contactInput.Placeholder = "Company"
+				case 4:
+					m.contactInput.SetValue(m.editingContact.Notes)
+					m.contactInput.Placeholder = "Notes"
+				}
+				return m, nil
+			case tea.KeyEnter:
+				// Save the current field value first
+				switch m.contactEditField {
+				case 0:
+					m.editingContact.FullName = m.contactInput.Value()
+				case 1:
+					if m.contactInput.Value() != "" {
+						if len(m.editingContact.Emails) == 0 {
+							m.editingContact.Emails = []model.ContactEmail{{Type: "home"}}
+						}
+						m.editingContact.Emails[0].Email = m.contactInput.Value()
+					}
+				case 2:
+					if m.contactInput.Value() != "" {
+						if len(m.editingContact.Phones) == 0 {
+							m.editingContact.Phones = []model.ContactPhone{{Type: "mobile"}}
+						}
+						m.editingContact.Phones[0].Number = m.contactInput.Value()
+					}
+				case 3:
+					m.editingContact.Company = m.contactInput.Value()
+				case 4:
+					m.editingContact.Notes = m.contactInput.Value()
+				}
+				
+				// Save the contact
+				if m.editingContact.FullName == "" {
+					m.err = fmt.Errorf("contact name cannot be empty")
+					return m, nil
+				}
+				m.loading = true
+				if m.editingContact.ID == "" {
+					return m, createContactCmd(m.client, *m.editingContact)
+				}
+				return m, updateContactCmd(m.client, *m.editingContact)
+			case tea.KeyEsc:
+				m.editingContact = nil
+				m.contactInput.Blur()
+				return m, nil
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			}
+		}
+		return m, cmd
 	}
 
 	// Handle Composition States
@@ -421,12 +705,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Go to Calendar
 			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
 				m.state = viewCalendar
+				if len(m.calendars) == 0 && m.client != nil && !m.offlineMode {
+					m.loading = true
+					return m, fetchCalendarsCmd(m.client)
+				}
 				return m, nil
 			}
 		case "3":
 			// Go to Contacts
 			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
 				m.state = viewContacts
+				if len(m.addressBooks) == 0 && m.client != nil && !m.offlineMode {
+					m.loading = true
+					return m, fetchAddressBooksCmd(m.client)
+				}
 				return m, nil
 			}
 		case "4":
@@ -450,6 +742,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, deleteEmailCmd(m.client, selectedEmail.ID)
+			} else if m.state == viewCalendar && len(m.events) > 0 && !m.offlineMode {
+				if m.viewEventDetail || m.editingEvent == nil {
+					m.loading = true
+					eventID := m.events[m.eventCursor].ID
+					// Optimistic UI update
+					if m.eventCursor < len(m.events)-1 {
+						m.events = append(m.events[:m.eventCursor], m.events[m.eventCursor+1:]...)
+					} else {
+						m.events = m.events[:m.eventCursor]
+						if m.eventCursor > 0 {
+							m.eventCursor--
+						}
+					}
+					m.viewEventDetail = false
+					return m, deleteEventCmd(m.client, eventID)
+				}
+			} else if m.state == viewContacts && len(m.contacts) > 0 && !m.offlineMode {
+				if m.viewContactDetail || m.editingContact == nil {
+					m.loading = true
+					contactID := m.contacts[m.contactCursor].ID
+					// Optimistic UI update
+					if m.contactCursor < len(m.contacts)-1 {
+						m.contacts = append(m.contacts[:m.contactCursor], m.contacts[m.contactCursor+1:]...)
+					} else {
+						m.contacts = m.contacts[:m.contactCursor]
+						if m.contactCursor > 0 {
+							m.contactCursor--
+						}
+					}
+					m.viewContactDetail = false
+					return m, deleteContactCmd(m.client, contactID)
+				}
 			}
 
 		case "u":
@@ -525,6 +849,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, textinput.Blink
 					}
 				}
+			} else if m.state == viewCalendar && m.viewEventDetail && len(m.events) > 0 && !m.offlineMode {
+				// Edit event
+				event := m.events[m.eventCursor]
+				m.editingEvent = &event
+				m.viewEventDetail = false
+				m.eventInput.SetValue(event.Title)
+				m.eventInput.Focus()
+				return m, textinput.Blink
+			} else if m.state == viewContacts && m.viewContactDetail && len(m.contacts) > 0 && !m.offlineMode {
+				// Edit contact
+				contact := m.contacts[m.contactCursor]
+				m.editingContact = &contact
+				m.viewContactDetail = false
+				m.contactInput.SetValue(contact.FullName)
+				m.contactInput.Focus()
+				m.contactEditField = 0
+				return m, textinput.Blink
 			}
 
 		case "c":
@@ -642,6 +983,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.emailOffset = m.emailCursor
 					}
 				}
+			} else if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil {
+				if m.eventCursor > 0 {
+					m.eventCursor--
+				}
+			} else if m.state == viewContacts && !m.viewContactDetail && m.editingContact == nil {
+				if m.contactCursor > 0 {
+					m.contactCursor--
+				}
 			} else if m.state == viewSettings {
 				if m.settingsCursor > 0 {
 					m.settingsCursor--
@@ -676,6 +1025,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selectedMB := m.mailboxes[m.mbCursor]
 					return m, fetchEmailsCmd(m.client, m.db, selectedMB.ID, len(m.emails))
 				}
+			} else if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil {
+				if m.eventCursor < len(m.events)-1 {
+					m.eventCursor++
+				}
+			} else if m.state == viewContacts && !m.viewContactDetail && m.editingContact == nil {
+				if m.contactCursor < len(m.contacts)-1 {
+					m.contactCursor++
+				}
+			} else if m.state == viewSettings {
+				if m.settingsCursor > 0 {
+					m.settingsCursor--
+				}
 			}
 
 		case "enter", "right", "l":
@@ -689,6 +1050,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, fetchMailboxesOfflineCmd(m.db)
 					}
 					return m, fetchMailboxesCmd(m.client, m.db)
+				} else if selectedItem.State == viewCalendar && !m.offlineMode && m.client != nil {
+					m.loading = true
+					return m, fetchCalendarsCmd(m.client)
+				} else if selectedItem.State == viewContacts && !m.offlineMode && m.client != nil {
+					m.loading = true
+					return m, fetchAddressBooksCmd(m.client)
 				}
 				return m, nil
 			} else if m.state == viewMailboxes && len(m.mailboxes) > 0 {
@@ -706,6 +1073,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				selectedEmail := m.emails[m.emailCursor]
 				return m, fetchEmailBodyCmd(m.client, m.db, selectedEmail.ID)
+			} else if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil && len(m.events) > 0 {
+				// View event details
+				m.viewEventDetail = true
+				return m, nil
+			} else if m.state == viewContacts && !m.viewContactDetail && m.editingContact == nil && len(m.contacts) > 0 {
+				// View contact details
+				m.viewContactDetail = true
+				return m, nil
 			} else if m.state == viewSettings {
 				// Toggle offline mode
 				if m.settingsCursor == 0 {
@@ -733,7 +1108,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.state == viewBody {
 				m.state = viewEmails
 				m.bodyContent = ""
-			} else if m.state == viewCalendar || m.state == viewContacts || m.state == viewSettings {
+			} else if m.state == viewCalendar {
+				if m.viewEventDetail {
+					m.viewEventDetail = false
+				} else if m.editingEvent != nil {
+					m.editingEvent = nil
+				} else {
+					m.state = viewMainMenu
+				}
+				return m, nil
+			} else if m.state == viewContacts {
+				if m.viewContactDetail {
+					m.viewContactDetail = false
+				} else if m.editingContact != nil {
+					m.editingContact = nil
+				} else {
+					m.state = viewMainMenu
+				}
+				return m, nil
+			} else if m.state == viewSettings {
 				m.state = viewMainMenu
 				return m, nil
 			}
@@ -747,6 +1140,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				selectedMB := m.mailboxes[m.mbCursor]
 				return m, tea.Batch(fetchMailboxesCmd(m.client, m.db), refreshEmailsCmd(m.client, m.db, selectedMB.ID))
+			} else if m.state == viewCalendar && !m.offlineMode && m.client != nil {
+				m.loading = true
+				var calIDs []string
+				for _, cal := range m.calendars {
+					if cal.IsVisible && cal.MayReadItems {
+						calIDs = append(calIDs, cal.ID)
+					}
+				}
+				return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+			} else if m.state == viewContacts && !m.offlineMode && m.client != nil {
+				m.loading = true
+				abID := ""
+				if m.addressBookCursor < len(m.addressBooks) {
+					abID = m.addressBooks[m.addressBookCursor].ID
+				}
+				return m, fetchContactsCmd(m.client, abID, "", 100)
+			}
+
+		// Calendar-specific keys
+		case "n":
+			if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil && !m.offlineMode {
+				// Create new event
+				m.editingEvent = &model.CalendarEvent{
+					Start: time.Now().Truncate(time.Hour).Add(time.Hour),
+				}
+				// Set default calendar
+				for _, cal := range m.calendars {
+					if cal.IsDefault && cal.MayAddItems {
+						m.editingEvent.CalendarID = cal.ID
+						break
+					}
+				}
+				if m.editingEvent.CalendarID == "" && len(m.calendars) > 0 {
+					for _, cal := range m.calendars {
+						if cal.MayAddItems {
+							m.editingEvent.CalendarID = cal.ID
+							break
+						}
+					}
+				}
+				m.eventInput.SetValue("")
+				m.eventInput.Focus()
+				return m, textinput.Blink
+			} else if m.state == viewContacts && !m.viewContactDetail && m.editingContact == nil && !m.offlineMode {
+				// Create new contact
+				m.editingContact = &model.Contact{}
+				// Set default address book
+				for _, ab := range m.addressBooks {
+					if ab.IsDefault && ab.MayAddItems {
+						m.editingContact.AddressBookID = ab.ID
+						break
+					}
+				}
+				if m.editingContact.AddressBookID == "" && len(m.addressBooks) > 0 {
+					for _, ab := range m.addressBooks {
+						if ab.MayAddItems {
+							m.editingContact.AddressBookID = ab.ID
+							break
+						}
+					}
+				}
+				m.contactInput.SetValue("")
+				m.contactInput.Focus()
+				m.contactEditField = 0
+				return m, textinput.Blink
 			}
 		}
 
@@ -1064,22 +1522,207 @@ func (m Model) View() string {
 		}
 
 	} else if m.state == viewCalendar {
-		s.WriteString("Calendar\n\n")
-		s.WriteString("Coming soon...\n\n")
-		s.WriteString("Calendar integration with Fastmail will allow you to:\n")
-		s.WriteString("  - View your events\n")
-		s.WriteString("  - Create and edit events\n")
-		s.WriteString("  - Manage multiple calendars\n")
-		s.WriteString("\n(0: back to menu)")
+		s.WriteString("Calendar - Agenda View\n\n")
+		
+		if m.loading {
+			s.WriteString("Loading calendar...")
+		} else if m.editingEvent != nil {
+			// Editing/Creating event
+			if m.editingEvent.ID == "" {
+				s.WriteString("Create New Event\n\n")
+			} else {
+				s.WriteString("Edit Event\n\n")
+			}
+			s.WriteString(fmt.Sprintf("Title: %s\n", m.eventInput.View()))
+			s.WriteString(fmt.Sprintf("Date: %s\n", m.editingEvent.Start.Format("2006-01-02")))
+			s.WriteString(fmt.Sprintf("Time: %s\n", m.editingEvent.Start.Format("15:04")))
+			if m.editingEvent.Duration != "" {
+				s.WriteString(fmt.Sprintf("Duration: %s\n", m.editingEvent.Duration))
+			}
+			s.WriteString(fmt.Sprintf("Location: %s\n", m.editingEvent.Location))
+			s.WriteString("\n(enter: save, esc: cancel)")
+		} else if m.viewEventDetail && m.eventCursor < len(m.events) {
+			// Viewing event details
+			e := m.events[m.eventCursor]
+			s.WriteString(fmt.Sprintf("Title: %s\n\n", e.Title))
+			s.WriteString(fmt.Sprintf("Date: %s\n", e.Start.Format("Monday, January 2, 2006")))
+			if e.IsAllDay {
+				s.WriteString("Time: All Day\n")
+			} else {
+				s.WriteString(fmt.Sprintf("Time: %s - %s\n", e.Start.Format("15:04"), e.End.Format("15:04")))
+			}
+			if e.Location != "" {
+				s.WriteString(fmt.Sprintf("Location: %s\n", e.Location))
+			}
+			if e.Description != "" {
+				s.WriteString(fmt.Sprintf("\nDescription:\n%s\n", e.Description))
+			}
+			if len(e.Participants) > 0 {
+				s.WriteString("\nParticipants:\n")
+				for _, p := range e.Participants {
+					status := ""
+					if p.Status != "" {
+						status = fmt.Sprintf(" (%s)", p.Status)
+					}
+					s.WriteString(fmt.Sprintf("  - %s <%s>%s\n", p.Name, p.Email, status))
+				}
+			}
+			s.WriteString("\n(e: edit, d: delete, esc: back)")
+		} else if len(m.events) == 0 && len(m.calendars) > 0 {
+			s.WriteString("No events in the next " + fmt.Sprintf("%d", m.agendaDays) + " days.\n")
+			s.WriteString("\n(n: new event, r: refresh, esc: back)")
+		} else if len(m.calendars) == 0 {
+			s.WriteString("No calendars found. Make sure you have calendars in Fastmail.\n")
+			s.WriteString("\n(r: refresh, esc: back)")
+		} else {
+			// Agenda view
+			today := time.Now().Truncate(24 * time.Hour)
+			currentDate := time.Time{}
+			
+			for i, e := range m.events {
+				eventDate := e.Start.Truncate(24 * time.Hour)
+				
+				// Print date header if new day
+				if eventDate != currentDate {
+					currentDate = eventDate
+					dateStr := eventDate.Format("Monday, January 2")
+					if eventDate.Equal(today) {
+						dateStr += " (Today)"
+					} else if eventDate.Equal(today.AddDate(0, 0, 1)) {
+						dateStr += " (Tomorrow)"
+					}
+					s.WriteString("\n" + dateStr + "\n")
+					s.WriteString(strings.Repeat("-", len(dateStr)) + "\n")
+				}
+				
+				// Event line
+				cursor := " "
+				style := emailItemStyle
+				if i == m.eventCursor {
+					cursor = ">"
+					style = selectedEmailItemStyle
+				}
+				
+				timeStr := e.Start.Format("15:04")
+				if e.IsAllDay {
+					timeStr = "All Day"
+				}
+				
+				line := fmt.Sprintf("%s %s  %s", cursor, timeStr, e.Title)
+				if e.Location != "" {
+					line += fmt.Sprintf(" @ %s", e.Location)
+				}
+				s.WriteString(style.Render(line) + "\n")
+			}
+			s.WriteString("\n(j/k navigate, enter: view, n: new, d: delete, r: refresh)")
+		}
 
 	} else if m.state == viewContacts {
 		s.WriteString("Contacts\n\n")
-		s.WriteString("Coming soon...\n\n")
-		s.WriteString("Contacts integration with Fastmail will allow you to:\n")
-		s.WriteString("  - Browse your contacts\n")
-		s.WriteString("  - Add and edit contacts\n")
-		s.WriteString("  - Search contacts\n")
-		s.WriteString("\n(0: back to menu)")
+		
+		if m.loading {
+			s.WriteString("Loading contacts...")
+		} else if m.editingContact != nil {
+			// Editing/Creating contact
+			if m.editingContact.ID == "" {
+				s.WriteString("Create New Contact\n\n")
+			} else {
+				s.WriteString("Edit Contact\n\n")
+			}
+			
+			fields := []struct {
+				label string
+				value string
+			}{
+				{"Full Name", m.editingContact.FullName},
+				{"Email", ""},
+				{"Phone", ""},
+				{"Company", m.editingContact.Company},
+				{"Notes", m.editingContact.Notes},
+			}
+			if len(m.editingContact.Emails) > 0 {
+				fields[1].value = m.editingContact.Emails[0].Email
+			}
+			if len(m.editingContact.Phones) > 0 {
+				fields[2].value = m.editingContact.Phones[0].Number
+			}
+			
+			for i, f := range fields {
+				marker := " "
+				if i == m.contactEditField {
+					marker = ">"
+					s.WriteString(fmt.Sprintf("%s %s: %s\n", marker, f.label, m.contactInput.View()))
+				} else {
+					s.WriteString(fmt.Sprintf("%s %s: %s\n", marker, f.label, f.value))
+				}
+			}
+			s.WriteString("\n(tab: next field, enter: save, esc: cancel)")
+		} else if m.viewContactDetail && m.contactCursor < len(m.contacts) {
+			// Viewing contact details
+			c := m.contacts[m.contactCursor]
+			s.WriteString(fmt.Sprintf("Name: %s\n\n", c.FullName))
+			if c.Nickname != "" {
+				s.WriteString(fmt.Sprintf("Nickname: %s\n", c.Nickname))
+			}
+			if c.Company != "" || c.JobTitle != "" {
+				s.WriteString(fmt.Sprintf("Work: %s - %s\n", c.Company, c.JobTitle))
+			}
+			
+			if len(c.Emails) > 0 {
+				s.WriteString("\nEmails:\n")
+				for _, e := range c.Emails {
+					s.WriteString(fmt.Sprintf("  %s: %s\n", e.Type, e.Email))
+				}
+			}
+			
+			if len(c.Phones) > 0 {
+				s.WriteString("\nPhones:\n")
+				for _, p := range c.Phones {
+					s.WriteString(fmt.Sprintf("  %s: %s\n", p.Type, p.Number))
+				}
+			}
+			
+			if len(c.Addresses) > 0 {
+				s.WriteString("\nAddresses:\n")
+				for _, a := range c.Addresses {
+					addr := strings.Join([]string{a.Street, a.City, a.State, a.PostalCode, a.Country}, ", ")
+					addr = strings.Trim(strings.ReplaceAll(addr, ", , ", ", "), ", ")
+					s.WriteString(fmt.Sprintf("  %s: %s\n", a.Type, addr))
+				}
+			}
+			
+			if c.Birthday != "" {
+				s.WriteString(fmt.Sprintf("\nBirthday: %s\n", c.Birthday))
+			}
+			
+			if c.Notes != "" {
+				s.WriteString(fmt.Sprintf("\nNotes:\n%s\n", c.Notes))
+			}
+			s.WriteString("\n(e: edit, d: delete, esc: back)")
+		} else if len(m.contacts) == 0 && len(m.addressBooks) > 0 {
+			s.WriteString("No contacts found.\n")
+			s.WriteString("\n(n: new contact, r: refresh, esc: back)")
+		} else if len(m.addressBooks) == 0 {
+			s.WriteString("No address books found.\n")
+			s.WriteString("\n(r: refresh, esc: back)")
+		} else {
+			// Contact list
+			for i, c := range m.contacts {
+				cursor := " "
+				style := emailItemStyle
+				if i == m.contactCursor {
+					cursor = ">"
+					style = selectedEmailItemStyle
+				}
+				
+				line := fmt.Sprintf("%s %s", cursor, c.FullName)
+				if len(c.Emails) > 0 {
+					line += fmt.Sprintf(" <%s>", c.Emails[0].Email)
+				}
+				s.WriteString(style.Render(line) + "\n")
+			}
+			s.WriteString("\n(j/k navigate, enter: view, n: new, d: delete, r: refresh)")
+		}
 
 	} else if m.state == viewSettings {
 		s.WriteString("Settings\n\n")
@@ -1293,5 +1936,107 @@ func saveDraftOfflineCmd(db *storage.DB, from, to, subject, body string) tea.Cmd
 		})
 		db.AddPendingAction("save_draft", localID, string(data))
 		return draftSavedMsg{}
+	}
+}
+
+// Calendar Commands
+func fetchCalendarsCmd(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		calendars, err := client.FetchCalendars()
+		if err != nil {
+			return errorMsg(err)
+		}
+		return calendarsLoadedMsg(calendars)
+	}
+}
+
+func fetchEventsCmd(client *api.Client, calendarIDs []string, start, end time.Time) tea.Cmd {
+	return func() tea.Msg {
+		events, err := client.FetchEvents(calendarIDs, start, end)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return eventsLoadedMsg(events)
+	}
+}
+
+func createEventCmd(client *api.Client, event model.CalendarEvent) tea.Cmd {
+	return func() tea.Msg {
+		_, err := client.CreateEvent(event)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return eventCreatedMsg{}
+	}
+}
+
+func updateEventCmd(client *api.Client, event model.CalendarEvent) tea.Cmd {
+	return func() tea.Msg {
+		err := client.UpdateEvent(event)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return eventCreatedMsg{} // Reuse created msg to trigger refresh
+	}
+}
+
+func deleteEventCmd(client *api.Client, eventID string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.DeleteEvent(eventID)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return eventDeletedMsg{}
+	}
+}
+
+// Contacts Commands
+func fetchAddressBooksCmd(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		addressBooks, err := client.FetchAddressBooks()
+		if err != nil {
+			return errorMsg(err)
+		}
+		return addressBooksLoadedMsg(addressBooks)
+	}
+}
+
+func fetchContactsCmd(client *api.Client, addressBookID, search string, limit int) tea.Cmd {
+	return func() tea.Msg {
+		contacts, err := client.FetchContacts(addressBookID, search, limit)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return contactsLoadedMsg(contacts)
+	}
+}
+
+func createContactCmd(client *api.Client, contact model.Contact) tea.Cmd {
+	return func() tea.Msg {
+		_, err := client.CreateContact(contact)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return contactCreatedMsg{}
+	}
+}
+
+func updateContactCmd(client *api.Client, contact model.Contact) tea.Cmd {
+	return func() tea.Msg {
+		err := client.UpdateContact(contact)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return contactCreatedMsg{} // Reuse created msg to trigger refresh
+	}
+}
+
+func deleteContactCmd(client *api.Client, contactID string) tea.Cmd {
+	return func() tea.Msg {
+		err := client.DeleteContact(contactID)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return contactDeletedMsg{}
 	}
 }

@@ -12,6 +12,8 @@ A minimalist, terminal-based user interface (TUI) for Fastmail, built in Go.
 - **Reply & Forward**: Reply to sender, reply all, or forward emails with quoted content.
 - **Draft Management**: Save, edit, and send drafts.
 - **Email Actions**: Mark read/unread, flag, archive, and delete emails.
+- **Calendar**: View upcoming events in an agenda view, create and edit events.
+- **Contacts**: Browse your address book, add and edit contacts.
 - **Pagination**: Infinite scroll through large mailboxes.
 - **Auto-Refresh**: Automatic sync with server after actions.
 - **Offline Mode**: Store emails locally for offline access. Drafts created offline sync when back online.
@@ -146,6 +148,41 @@ Data is stored in `~/.config/fm-cli/emails.db`.
 | `e` | Edit body |
 | `n` | Cancel |
 | `Tab` | Change sending identity |
+
+#### Calendar (Agenda View)
+| Key | Action |
+| --- | --- |
+| `j` / `k` (or Arrows) | Navigate events |
+| `Enter` / `l` | View event details |
+| `n` | Create new event |
+| `e` | Edit event (from details view) |
+| `d` | Delete event |
+| `r` | Refresh |
+| `h` / `Esc` | Back (from details) or to menu |
+
+#### Calendar Event Editor
+| Key | Action |
+| --- | --- |
+| `Enter` | Save event |
+| `Esc` | Cancel |
+
+#### Contacts
+| Key | Action |
+| --- | --- |
+| `j` / `k` (or Arrows) | Navigate contacts |
+| `Enter` / `l` | View contact details |
+| `n` | Create new contact |
+| `e` | Edit contact (from details view) |
+| `d` | Delete contact |
+| `r` | Refresh |
+| `h` / `Esc` | Back (from details) or to menu |
+
+#### Contact Editor
+| Key | Action |
+| --- | --- |
+| `Tab` | Move to next field |
+| `Enter` | Save contact |
+| `Esc` | Cancel |
 
 #### Settings
 | Key | Action |
