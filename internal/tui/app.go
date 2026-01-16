@@ -1,15 +1,18 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"fm-cli/internal/api"
 	"fm-cli/internal/model"
+	"fm-cli/internal/storage"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -80,7 +83,11 @@ type errorMsg error
 // Model implementation
 type Model struct {
 	client *api.Client
+	db     *storage.DB
 	state  sessionState
+
+	// Offline mode
+	offlineMode bool
 
 	// Mailbox View Data
 	mailboxes []model.Mailbox
@@ -112,6 +119,10 @@ type Model struct {
 }
 
 func NewModel(client *api.Client) Model {
+	return NewModelWithStorage(client, nil, false)
+}
+
+func NewModelWithStorage(client *api.Client, db *storage.DB, offlineMode bool) Model {
 	tiTo := textinput.New()
 	tiTo.Placeholder = "recipient@example.com"
 	tiTo.Focus()
@@ -121,6 +132,8 @@ func NewModel(client *api.Client) Model {
 
 	return Model{
 		client:       client,
+		db:           db,
+		offlineMode:  offlineMode,
 		state:        viewMailboxes,
 		inputTo:      tiTo,
 		inputSubject: tiSubj,
@@ -129,7 +142,10 @@ func NewModel(client *api.Client) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(fetchMailboxesCmd(m.client), fetchIdentitiesCmd(m.client))
+	if m.offlineMode {
+		return fetchMailboxesOfflineCmd(m.db)
+	}
+	return tea.Batch(fetchMailboxesCmd(m.client, m.db), fetchIdentitiesCmd(m.client))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -193,18 +209,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.state = viewMailboxes
 		os.Remove(m.tempFile)
-		return m, fetchMailboxesCmd(m.client)
+		return m, fetchMailboxesCmd(m.client, m.db)
 
 	case emailSentMsg:
 		m.loading = false
 		m.state = viewMailboxes
 		os.Remove(m.tempFile)
-		return m, fetchMailboxesCmd(m.client)
+		return m, fetchMailboxesCmd(m.client, m.db)
 
 	case emailDeletedMsg:
 		m.loading = false
 		// Refresh mailbox counts after delete
-		return m, fetchMailboxesCmd(m.client)
+		return m, fetchMailboxesCmd(m.client, m.db)
 
 	case errorMsg:
 		m.err = msg
@@ -565,7 +581,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.canLoadMore && !m.loading {
 					m.loading = true
 					selectedMB := m.mailboxes[m.mbCursor]
-					return m, fetchEmailsCmd(m.client, selectedMB.ID, len(m.emails))
+					return m, fetchEmailsCmd(m.client, m.db, selectedMB.ID, len(m.emails))
 				}
 			}
 
@@ -578,13 +594,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				m.canLoadMore = true
 				selectedMB := m.mailboxes[m.mbCursor]
-				return m, fetchEmailsCmd(m.client, selectedMB.ID, 0)
+				return m, fetchEmailsCmd(m.client, m.db, selectedMB.ID, 0)
 			} else if m.state == viewEmails && len(m.emails) > 0 {
 				// Always go to preview first, even for drafts
 				m.state = viewBody
 				m.loading = true
 				selectedEmail := m.emails[m.emailCursor]
-				return m, fetchEmailBodyCmd(m.client, selectedEmail.ID)
+				return m, fetchEmailBodyCmd(m.client, m.db, selectedEmail.ID)
 			}
 
 		case "esc", "left", "h":
@@ -592,7 +608,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = viewMailboxes
 				m.emails = nil
 				// Refresh mailbox counts when returning
-				return m, fetchMailboxesCmd(m.client)
+				return m, fetchMailboxesCmd(m.client, m.db)
 			} else if m.state == viewBody {
 				m.state = viewEmails
 				m.bodyContent = ""
@@ -602,11 +618,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Manual refresh
 			if m.state == viewMailboxes {
 				m.loading = true
-				return m, fetchMailboxesCmd(m.client)
+				return m, fetchMailboxesCmd(m.client, m.db)
 			} else if m.state == viewEmails && len(m.mailboxes) > 0 {
 				m.loading = true
 				selectedMB := m.mailboxes[m.mbCursor]
-				return m, tea.Batch(fetchMailboxesCmd(m.client), refreshEmailsCmd(m.client, selectedMB.ID))
+				return m, tea.Batch(fetchMailboxesCmd(m.client, m.db), refreshEmailsCmd(m.client, m.db, selectedMB.ID))
 			}
 		}
 
@@ -954,9 +970,26 @@ func toggleFlaggedCmd(client *api.Client, emailID string, isFlagged bool) tea.Cm
 	}
 }
 
-func fetchMailboxesCmd(client *api.Client) tea.Cmd {
+func fetchMailboxesCmd(client *api.Client, db *storage.DB) tea.Cmd {
 	return func() tea.Msg {
 		mbs, err := client.FetchMailboxes()
+		if err != nil {
+			return errorMsg(err)
+		}
+		// Save to local storage if available
+		if db != nil {
+			db.SaveMailboxes(mbs)
+		}
+		return mailboxesLoadedMsg(mbs)
+	}
+}
+
+func fetchMailboxesOfflineCmd(db *storage.DB) tea.Cmd {
+	return func() tea.Msg {
+		if db == nil {
+			return errorMsg(fmt.Errorf("no local storage available"))
+		}
+		mbs, err := db.GetMailboxes()
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -978,9 +1011,26 @@ func fetchIdentitiesCmd(client *api.Client) tea.Cmd {
 	}
 }
 
-func fetchEmailsCmd(client *api.Client, mailboxID string, offset int) tea.Cmd {
+func fetchEmailsCmd(client *api.Client, db *storage.DB, mailboxID string, offset int) tea.Cmd {
 	return func() tea.Msg {
 		emails, err := client.FetchEmails(mailboxID, offset)
+		if err != nil {
+			return errorMsg(err)
+		}
+		// Save to local storage if available
+		if db != nil {
+			db.SaveEmails(emails)
+		}
+		return emailsLoadedMsg(emails)
+	}
+}
+
+func fetchEmailsOfflineCmd(db *storage.DB, mailboxID string, offset int) tea.Cmd {
+	return func() tea.Msg {
+		if db == nil {
+			return errorMsg(fmt.Errorf("no local storage available"))
+		}
+		emails, err := db.GetEmails(mailboxID, offset, 20)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -988,22 +1038,62 @@ func fetchEmailsCmd(client *api.Client, mailboxID string, offset int) tea.Cmd {
 	}
 }
 
-func refreshEmailsCmd(client *api.Client, mailboxID string) tea.Cmd {
+func refreshEmailsCmd(client *api.Client, db *storage.DB, mailboxID string) tea.Cmd {
 	return func() tea.Msg {
 		emails, err := client.FetchEmails(mailboxID, 0)
 		if err != nil {
 			return errorMsg(err)
 		}
+		if db != nil {
+			db.SaveEmails(emails)
+		}
 		return emailsRefreshedMsg(emails)
 	}
 }
 
-func fetchEmailBodyCmd(client *api.Client, emailID string) tea.Cmd {
-return func() tea.Msg {
-body, err := client.FetchEmailBody(emailID)
-if err != nil {
-return errorMsg(err)
+func fetchEmailBodyCmd(client *api.Client, db *storage.DB, emailID string) tea.Cmd {
+	return func() tea.Msg {
+		body, err := client.FetchEmailBody(emailID)
+		if err != nil {
+			return errorMsg(err)
+		}
+		// Save body to local storage
+		if db != nil {
+			db.SaveEmailBody(emailID, body)
+		}
+		return emailBodyLoadedMsg(body)
+	}
 }
-return emailBodyLoadedMsg(body)
+
+func fetchEmailBodyOfflineCmd(db *storage.DB, emailID string) tea.Cmd {
+	return func() tea.Msg {
+		if db == nil {
+			return errorMsg(fmt.Errorf("no local storage available"))
+		}
+		body, err := db.GetEmailBody(emailID)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return emailBodyLoadedMsg(body)
+	}
 }
+
+func saveDraftOfflineCmd(db *storage.DB, from, to, subject, body string) tea.Cmd {
+	return func() tea.Msg {
+		if db == nil {
+			return errorMsg(fmt.Errorf("no local storage available"))
+		}
+		// Generate a local ID
+		localID := fmt.Sprintf("local-%d", time.Now().UnixNano())
+		err := db.SaveLocalDraft(localID, from, to, subject, body)
+		if err != nil {
+			return errorMsg(err)
+		}
+		// Queue for sync
+		data, _ := json.Marshal(map[string]string{
+			"from": from, "to": to, "subject": subject, "body": body,
+		})
+		db.AddPendingAction("save_draft", localID, string(data))
+		return draftSavedMsg{}
+	}
 }

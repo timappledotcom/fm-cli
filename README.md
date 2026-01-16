@@ -13,6 +13,7 @@ A minimalist, terminal-based user interface (TUI) for Fastmail, built in Go.
 - **Email Actions**: Mark read/unread, flag, archive, and delete emails.
 - **Pagination**: Infinite scroll through large mailboxes.
 - **Auto-Refresh**: Automatic sync with server after actions.
+- **Offline Mode**: Store emails locally for offline access. Drafts created offline sync when back online.
 - **Clickable Links**: Supports OSC 8 hyperlinks for supported terminals.
 - **Detailed Headers**: Toggle expanded email headers.
 - **Secure Auth**: Stores your API token securely in the system keyring.
@@ -23,6 +24,7 @@ A minimalist, terminal-based user interface (TUI) for Fastmail, built in Go.
 
 - Go 1.25+
 - A Fastmail account with an API Token.
+- CGO enabled (for SQLite support in offline mode)
 
 ### Build
 
@@ -44,6 +46,35 @@ go build ./cmd/fm-cli
    ```bash
    ./fm-cli
    ```
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `fm-cli` | Start the TUI |
+| `fm-cli login` | Store API token in system keychain |
+| `fm-cli logout` | Remove API token from keychain |
+| `fm-cli settings` | View/modify settings |
+| `fm-cli settings offline on` | Enable offline mode |
+| `fm-cli settings offline off` | Disable offline mode |
+| `fm-cli sync` | Sync pending offline changes |
+| `fm-cli help` | Show help |
+
+### Offline Mode
+
+Enable offline mode to store emails locally:
+
+```bash
+./fm-cli settings offline on
+```
+
+When offline mode is enabled:
+- Emails and mailboxes are cached locally in SQLite
+- You can read cached emails without internet
+- Drafts created offline are queued for sync
+- Run `fm-cli sync` when back online to push changes
+
+Data is stored in `~/.config/fm-cli/emails.db`.
 
 ### Controls
 
