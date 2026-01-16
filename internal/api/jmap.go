@@ -46,6 +46,32 @@ func NewClient(token string) (*Client, error) {
 	}, nil
 }
 
+// DebugSession prints session info for debugging
+func (c *Client) DebugSession() string {
+	if c.Session == nil {
+		return "No session"
+	}
+	var sb strings.Builder
+	sb.WriteString("=== JMAP Session Debug ===\n")
+	sb.WriteString(fmt.Sprintf("API URL: %s\n", c.Session.APIURL))
+	sb.WriteString("\nCapabilities:\n")
+	for uri := range c.Session.Capabilities {
+		sb.WriteString(fmt.Sprintf("  - %s\n", uri))
+	}
+	sb.WriteString("\nPrimary Accounts:\n")
+	for uri, id := range c.Session.PrimaryAccounts {
+		sb.WriteString(fmt.Sprintf("  %s: %s\n", uri, id))
+	}
+	sb.WriteString("\nAccounts:\n")
+	for id, acc := range c.Session.Accounts {
+		sb.WriteString(fmt.Sprintf("  Account %s: %s\n", id, acc.Name))
+		for uri := range acc.RawCapabilities {
+			sb.WriteString(fmt.Sprintf("    - %s\n", uri))
+		}
+	}
+	return sb.String()
+}
+
 func (c *Client) getMailAccountID() jmap.ID {
 	if c.Session == nil {
 		return ""

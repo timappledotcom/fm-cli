@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -109,9 +110,10 @@ var mainMenuItems = []MainMenuItem{
 
 // Model implementation
 type Model struct {
-	client *api.Client
-	db     *storage.DB
-	state  sessionState
+	client    *api.Client
+	davClient *api.DAVClient
+	db        *storage.DB
+	state     sessionState
 
 	// Offline mode
 	offlineMode bool
@@ -173,10 +175,10 @@ type Model struct {
 }
 
 func NewModel(client *api.Client) Model {
-	return NewModelWithStorage(client, nil, false)
+	return NewModelWithStorage(client, nil, nil, false)
 }
 
-func NewModelWithStorage(client *api.Client, db *storage.DB, offlineMode bool) Model {
+func NewModelWithStorage(client *api.Client, davClient *api.DAVClient, db *storage.DB, offlineMode bool) Model {
 	tiTo := textinput.New()
 	tiTo.Placeholder = "recipient@example.com"
 	tiTo.Focus()
@@ -192,6 +194,7 @@ func NewModelWithStorage(client *api.Client, db *storage.DB, offlineMode bool) M
 
 	return Model{
 		client:       client,
+		davClient:    davClient,
 		db:           db,
 		offlineMode:  offlineMode,
 		state:        viewMainMenu,
@@ -299,7 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if len(calIDs) > 0 {
-				return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+				return m, fetchEventsCmd(m.davClient, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
 			}
 		}
 		return m, nil
@@ -325,7 +328,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				defaultAB = m.addressBooks[0].ID
 			}
 			if defaultAB != "" {
-				return m, fetchContactsCmd(m.client, defaultAB, "", 100)
+				return m, fetchContactsCmd(m.davClient, defaultAB, 100)
 			}
 		}
 		return m, nil
@@ -346,7 +349,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					calIDs = append(calIDs, cal.ID)
 				}
 			}
-			return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+			return m, fetchEventsCmd(m.davClient, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
 		}
 		return m, nil
 
@@ -361,7 +364,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					calIDs = append(calIDs, cal.ID)
 				}
 			}
-			return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+			return m, fetchEventsCmd(m.davClient, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
 		}
 		return m, nil
 
@@ -374,7 +377,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.addressBookCursor < len(m.addressBooks) {
 				abID = m.addressBooks[m.addressBookCursor].ID
 			}
-			return m, fetchContactsCmd(m.client, abID, "", 100)
+			return m, fetchContactsCmd(m.davClient, abID, 100)
 		}
 		return m, nil
 
@@ -387,7 +390,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.addressBookCursor < len(m.addressBooks) {
 				abID = m.addressBooks[m.addressBookCursor].ID
 			}
-			return m, fetchContactsCmd(m.client, abID, "", 100)
+			return m, fetchContactsCmd(m.davClient, abID, 100)
 		}
 		return m, nil
 
@@ -421,9 +424,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.loading = true
 				if m.editingEvent.ID == "" {
-					return m, createEventCmd(m.client, *m.editingEvent)
+					return m, createEventCmd(m.davClient, *m.editingEvent)
 				}
-				return m, updateEventCmd(m.client, *m.editingEvent)
+				return m, updateEventCmd(m.davClient, *m.editingEvent)
 			case tea.KeyEsc:
 				m.editingEvent = nil
 				m.eventInput.Blur()
@@ -529,9 +532,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.loading = true
 				if m.editingContact.ID == "" {
-					return m, createContactCmd(m.client, *m.editingContact)
+					return m, createContactCmd(m.davClient, *m.editingContact)
 				}
-				return m, updateContactCmd(m.client, *m.editingContact)
+				return m, updateContactCmd(m.davClient, *m.editingContact)
 			case tea.KeyEsc:
 				m.editingContact = nil
 				m.contactInput.Blur()
@@ -707,7 +710,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = viewCalendar
 				if len(m.calendars) == 0 && m.client != nil && !m.offlineMode {
 					m.loading = true
-					return m, fetchCalendarsCmd(m.client)
+					return m, fetchCalendarsCmd(m.davClient)
 				}
 				return m, nil
 			}
@@ -717,7 +720,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = viewContacts
 				if len(m.addressBooks) == 0 && m.client != nil && !m.offlineMode {
 					m.loading = true
-					return m, fetchAddressBooksCmd(m.client)
+					return m, fetchAddressBooksCmd(m.davClient)
 				}
 				return m, nil
 			}
@@ -756,7 +759,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 					m.viewEventDetail = false
-					return m, deleteEventCmd(m.client, eventID)
+					return m, deleteEventCmd(m.davClient, eventID)
 				}
 			} else if m.state == viewContacts && len(m.contacts) > 0 && !m.offlineMode {
 				if m.viewContactDetail || m.editingContact == nil {
@@ -772,7 +775,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 					m.viewContactDetail = false
-					return m, deleteContactCmd(m.client, contactID)
+					return m, deleteContactCmd(m.davClient, contactID)
 				}
 			}
 
@@ -1052,10 +1055,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, fetchMailboxesCmd(m.client, m.db)
 				} else if selectedItem.State == viewCalendar && !m.offlineMode && m.client != nil {
 					m.loading = true
-					return m, fetchCalendarsCmd(m.client)
+					return m, fetchCalendarsCmd(m.davClient)
 				} else if selectedItem.State == viewContacts && !m.offlineMode && m.client != nil {
 					m.loading = true
-					return m, fetchAddressBooksCmd(m.client)
+					return m, fetchAddressBooksCmd(m.davClient)
 				}
 				return m, nil
 			} else if m.state == viewMailboxes && len(m.mailboxes) > 0 {
@@ -1148,14 +1151,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						calIDs = append(calIDs, cal.ID)
 					}
 				}
-				return m, fetchEventsCmd(m.client, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
+				return m, fetchEventsCmd(m.davClient, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
 			} else if m.state == viewContacts && !m.offlineMode && m.client != nil {
 				m.loading = true
 				abID := ""
 				if m.addressBookCursor < len(m.addressBooks) {
 					abID = m.addressBooks[m.addressBookCursor].ID
 				}
-				return m, fetchContactsCmd(m.client, abID, "", 100)
+				return m, fetchContactsCmd(m.davClient, abID, 100)
 			}
 
 		// Calendar-specific keys
@@ -1939,10 +1942,13 @@ func saveDraftOfflineCmd(db *storage.DB, from, to, subject, body string) tea.Cmd
 	}
 }
 
-// Calendar Commands
-func fetchCalendarsCmd(client *api.Client) tea.Cmd {
+// Calendar Commands (using CalDAV)
+func fetchCalendarsCmd(davClient *api.DAVClient) tea.Cmd {
 	return func() tea.Msg {
-		calendars, err := client.FetchCalendars()
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CalDAV not configured. Run 'fm-cli login' with app password"))
+		}
+		calendars, err := davClient.FetchCalendars(context.Background())
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -1950,9 +1956,12 @@ func fetchCalendarsCmd(client *api.Client) tea.Cmd {
 	}
 }
 
-func fetchEventsCmd(client *api.Client, calendarIDs []string, start, end time.Time) tea.Cmd {
+func fetchEventsCmd(davClient *api.DAVClient, calendarPaths []string, start, end time.Time) tea.Cmd {
 	return func() tea.Msg {
-		events, err := client.FetchEvents(calendarIDs, start, end)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CalDAV not configured"))
+		}
+		events, err := davClient.FetchEvents(context.Background(), calendarPaths, start, end)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -1960,9 +1969,12 @@ func fetchEventsCmd(client *api.Client, calendarIDs []string, start, end time.Ti
 	}
 }
 
-func createEventCmd(client *api.Client, event model.CalendarEvent) tea.Cmd {
+func createEventCmd(davClient *api.DAVClient, event model.CalendarEvent) tea.Cmd {
 	return func() tea.Msg {
-		_, err := client.CreateEvent(event)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CalDAV not configured"))
+		}
+		_, err := davClient.CreateEvent(context.Background(), event)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -1970,9 +1982,12 @@ func createEventCmd(client *api.Client, event model.CalendarEvent) tea.Cmd {
 	}
 }
 
-func updateEventCmd(client *api.Client, event model.CalendarEvent) tea.Cmd {
+func updateEventCmd(davClient *api.DAVClient, event model.CalendarEvent) tea.Cmd {
 	return func() tea.Msg {
-		err := client.UpdateEvent(event)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CalDAV not configured"))
+		}
+		err := davClient.UpdateEvent(context.Background(), event)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -1980,9 +1995,12 @@ func updateEventCmd(client *api.Client, event model.CalendarEvent) tea.Cmd {
 	}
 }
 
-func deleteEventCmd(client *api.Client, eventID string) tea.Cmd {
+func deleteEventCmd(davClient *api.DAVClient, eventPath string) tea.Cmd {
 	return func() tea.Msg {
-		err := client.DeleteEvent(eventID)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CalDAV not configured"))
+		}
+		err := davClient.DeleteEvent(context.Background(), eventPath)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -1990,10 +2008,13 @@ func deleteEventCmd(client *api.Client, eventID string) tea.Cmd {
 	}
 }
 
-// Contacts Commands
-func fetchAddressBooksCmd(client *api.Client) tea.Cmd {
+// Contacts Commands (using CardDAV)
+func fetchAddressBooksCmd(davClient *api.DAVClient) tea.Cmd {
 	return func() tea.Msg {
-		addressBooks, err := client.FetchAddressBooks()
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CardDAV not configured. Run 'fm-cli login' with app password"))
+		}
+		addressBooks, err := davClient.FetchAddressBooks(context.Background())
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -2001,9 +2022,12 @@ func fetchAddressBooksCmd(client *api.Client) tea.Cmd {
 	}
 }
 
-func fetchContactsCmd(client *api.Client, addressBookID, search string, limit int) tea.Cmd {
+func fetchContactsCmd(davClient *api.DAVClient, addressBookPath string, limit int) tea.Cmd {
 	return func() tea.Msg {
-		contacts, err := client.FetchContacts(addressBookID, search, limit)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CardDAV not configured"))
+		}
+		contacts, err := davClient.FetchContacts(context.Background(), addressBookPath, limit)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -2011,9 +2035,12 @@ func fetchContactsCmd(client *api.Client, addressBookID, search string, limit in
 	}
 }
 
-func createContactCmd(client *api.Client, contact model.Contact) tea.Cmd {
+func createContactCmd(davClient *api.DAVClient, contact model.Contact) tea.Cmd {
 	return func() tea.Msg {
-		_, err := client.CreateContact(contact)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CardDAV not configured"))
+		}
+		_, err := davClient.CreateContact(context.Background(), contact)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -2021,9 +2048,12 @@ func createContactCmd(client *api.Client, contact model.Contact) tea.Cmd {
 	}
 }
 
-func updateContactCmd(client *api.Client, contact model.Contact) tea.Cmd {
+func updateContactCmd(davClient *api.DAVClient, contact model.Contact) tea.Cmd {
 	return func() tea.Msg {
-		err := client.UpdateContact(contact)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CardDAV not configured"))
+		}
+		err := davClient.UpdateContact(context.Background(), contact)
 		if err != nil {
 			return errorMsg(err)
 		}
@@ -2031,9 +2061,12 @@ func updateContactCmd(client *api.Client, contact model.Contact) tea.Cmd {
 	}
 }
 
-func deleteContactCmd(client *api.Client, contactID string) tea.Cmd {
+func deleteContactCmd(davClient *api.DAVClient, contactPath string) tea.Cmd {
 	return func() tea.Msg {
-		err := client.DeleteContact(contactID)
+		if davClient == nil {
+			return errorMsg(fmt.Errorf("CardDAV not configured"))
+		}
+		err := davClient.DeleteContact(context.Background(), contactPath)
 		if err != nil {
 			return errorMsg(err)
 		}

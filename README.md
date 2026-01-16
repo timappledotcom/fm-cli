@@ -12,21 +12,23 @@ A minimalist, terminal-based user interface (TUI) for Fastmail, built in Go.
 - **Reply & Forward**: Reply to sender, reply all, or forward emails with quoted content.
 - **Draft Management**: Save, edit, and send drafts.
 - **Email Actions**: Mark read/unread, flag, archive, and delete emails.
-- **Calendar**: View upcoming events in an agenda view, create and edit events.
-- **Contacts**: Browse your address book, add and edit contacts.
+- **Calendar**: View upcoming events in an agenda view, create and edit events (via CalDAV).
+- **Contacts**: Browse your address book, add and edit contacts (via CardDAV).
 - **Pagination**: Infinite scroll through large mailboxes.
 - **Auto-Refresh**: Automatic sync with server after actions.
 - **Offline Mode**: Store emails locally for offline access. Drafts created offline sync when back online.
 - **Clickable Links**: Supports OSC 8 hyperlinks for supported terminals.
 - **Detailed Headers**: Toggle expanded email headers.
-- **Secure Auth**: Stores your API token securely in the system keyring.
+- **Secure Auth**: Stores your credentials securely in the system keyring.
 
 ## Installation
 
 ### Prerequisites
 
 - Go 1.25+
-- A Fastmail account with an API Token.
+- A Fastmail account with:
+  - An **API Token** (for email access via JMAP)
+  - An **App Password** (optional, for calendar/contacts via CalDAV/CardDAV)
 - CGO enabled (for SQLite support in offline mode)
 
 ### Build
@@ -43,12 +45,26 @@ go build ./cmd/fm-cli
    ```bash
    ./fm-cli login
    ```
-   Paste your Fastmail API token when prompted.
+   You will be prompted for:
+   - Your Fastmail email address
+   - Your API Token (required for email)
+   - Your App Password (optional, enables calendar/contacts)
 
 2. **Run**:
    ```bash
    ./fm-cli
    ```
+
+### Getting Your Credentials
+
+1. **API Token** (for email):
+   - Go to Fastmail Settings → Privacy & Security → Integrations → API Tokens
+   - Create a new token with Mail and Submission permissions
+
+2. **App Password** (for calendar/contacts):
+   - Go to Fastmail Settings → Privacy & Security → Integrations → App Passwords
+   - Create a new password with "Mail, Contacts & Calendars" access
+   - This uses CalDAV/CardDAV protocols which require a separate app password
 
 ### Commands
 
