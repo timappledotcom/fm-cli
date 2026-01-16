@@ -23,13 +23,24 @@ import (
 type sessionState int
 
 const (
-	viewMailboxes sessionState = iota
+	viewMainMenu sessionState = iota
+	viewMailboxes
 	viewEmails
 	viewBody
 	viewComposeTo
 	viewComposeSubject
 	viewComposeConfirm
+	viewCalendar
+	viewContacts
+	viewSettings
 )
+
+// MainMenuItem represents an option in the main menu
+type MainMenuItem struct {
+	Name     string
+	Shortcut string
+	State    sessionState
+}
 
 // Styles
 var (
@@ -80,6 +91,14 @@ type emailDeletedMsg struct{}
 type identitiesLoadedMsg []string
 type errorMsg error
 
+// Main menu items
+var mainMenuItems = []MainMenuItem{
+	{Name: "Mail", Shortcut: "m", State: viewMailboxes},
+	{Name: "Calendar", Shortcut: "c", State: viewCalendar},
+	{Name: "Contacts", Shortcut: "o", State: viewContacts},
+	{Name: "Settings", Shortcut: "s", State: viewSettings},
+}
+
 // Model implementation
 type Model struct {
 	client *api.Client
@@ -88,6 +107,9 @@ type Model struct {
 
 	// Offline mode
 	offlineMode bool
+
+	// Main Menu
+	menuCursor int
 
 	// Mailbox View Data
 	mailboxes []model.Mailbox
@@ -113,6 +135,9 @@ type Model struct {
 	identities   []string // Available sending identities (email addresses)
 	identityIdx  int      // Currently selected identity index
 
+	// Settings
+	settingsCursor int
+
 	err    error
 	width  int
 	height int
@@ -134,18 +159,19 @@ func NewModelWithStorage(client *api.Client, db *storage.DB, offlineMode bool) M
 		client:       client,
 		db:           db,
 		offlineMode:  offlineMode,
-		state:        viewMailboxes,
+		state:        viewMainMenu,
 		inputTo:      tiTo,
 		inputSubject: tiSubj,
-		loading:      true,
+		loading:      false,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.offlineMode {
-		return fetchMailboxesOfflineCmd(m.db)
+	// Pre-fetch identities on startup if online
+	if !m.offlineMode && m.client != nil {
+		return fetchIdentitiesCmd(m.client)
 	}
-	return tea.Batch(fetchMailboxesCmd(m.client, m.db), fetchIdentitiesCmd(m.client))
+	return nil
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -360,9 +386,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Normal Navigation States
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Clear error on any key press
+		if m.err != nil {
+			m.err = nil
+			return m, nil
+		}
+
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		
+		case "q":
+			// Only quit from main menu
+			if m.state == viewMainMenu {
+				return m, tea.Quit
+			}
+
+		// Global navigation shortcuts (number keys)
+		case "0":
+			// Back to main menu
+			m.state = viewMainMenu
+			return m, nil
+		case "1":
+			// Go to Mail
+			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
+				m.state = viewMailboxes
+				m.loading = true
+				if m.offlineMode {
+					return m, fetchMailboxesOfflineCmd(m.db)
+				}
+				return m, fetchMailboxesCmd(m.client, m.db)
+			}
+		case "2":
+			// Go to Calendar
+			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
+				m.state = viewCalendar
+				return m, nil
+			}
+		case "3":
+			// Go to Contacts
+			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
+				m.state = viewContacts
+				return m, nil
+			}
+		case "4":
+			// Go to Settings
+			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
+				m.state = viewSettings
+				return m, nil
+			}
 
 		case "d", "backspace":
 			if m.state == viewEmails && len(m.emails) > 0 {
@@ -544,9 +616,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showDetails = !m.showDetails
 				return m, nil
 			}
+			// 'm' also goes to Mail from main menu
+			if m.state == viewMainMenu {
+				m.state = viewMailboxes
+				m.loading = true
+				if m.offlineMode {
+					return m, fetchMailboxesOfflineCmd(m.db)
+				}
+				return m, fetchMailboxesCmd(m.client, m.db)
+			}
 
 		case "up", "k":
-			if m.state == viewMailboxes {
+			if m.state == viewMainMenu {
+				if m.menuCursor > 0 {
+					m.menuCursor--
+				}
+			} else if m.state == viewMailboxes {
 				if m.mbCursor > 0 {
 					m.mbCursor--
 				}
@@ -557,10 +642,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.emailOffset = m.emailCursor
 					}
 				}
+			} else if m.state == viewSettings {
+				if m.settingsCursor > 0 {
+					m.settingsCursor--
+				}
 			}
 
 		case "down", "j":
-			if m.state == viewMailboxes {
+			if m.state == viewMainMenu {
+				if m.menuCursor < len(mainMenuItems)-1 {
+					m.menuCursor++
+				}
+			} else if m.state == viewMailboxes {
 				if m.mbCursor < len(m.mailboxes)-1 {
 					m.mbCursor++
 				}
@@ -586,7 +679,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter", "right", "l":
-			if m.state == viewMailboxes && len(m.mailboxes) > 0 {
+			if m.state == viewMainMenu {
+				// Navigate to selected menu item
+				selectedItem := mainMenuItems[m.menuCursor]
+				m.state = selectedItem.State
+				if selectedItem.State == viewMailboxes {
+					m.loading = true
+					if m.offlineMode {
+						return m, fetchMailboxesOfflineCmd(m.db)
+					}
+					return m, fetchMailboxesCmd(m.client, m.db)
+				}
+				return m, nil
+			} else if m.state == viewMailboxes && len(m.mailboxes) > 0 {
 				m.state = viewEmails
 				m.emailCursor = 0 // reset cursor
 				m.emailOffset = 0 // reset offset
@@ -601,10 +706,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				selectedEmail := m.emails[m.emailCursor]
 				return m, fetchEmailBodyCmd(m.client, m.db, selectedEmail.ID)
+			} else if m.state == viewSettings {
+				// Toggle offline mode
+				if m.settingsCursor == 0 {
+					m.offlineMode = !m.offlineMode
+					if m.db != nil {
+						if m.offlineMode {
+							m.db.SetConfig("offline_mode", "true")
+						} else {
+							m.db.SetConfig("offline_mode", "false")
+						}
+					}
+				}
+				return m, nil
 			}
 
 		case "esc", "left", "h":
-			if m.state == viewEmails {
+			if m.state == viewMailboxes {
+				m.state = viewMainMenu
+				return m, nil
+			} else if m.state == viewEmails {
 				m.state = viewMailboxes
 				m.emails = nil
 				// Refresh mailbox counts when returning
@@ -612,6 +733,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.state == viewBody {
 				m.state = viewEmails
 				m.bodyContent = ""
+			} else if m.state == viewCalendar || m.state == viewContacts || m.state == viewSettings {
+				m.state = viewMainMenu
+				return m, nil
 			}
 
 		case "r":
@@ -739,21 +863,55 @@ func linkify(text string) string {
 
 func (m Model) View() string {
 	if m.err != nil {
-		return fmt.Sprintf("Error: %v", m.err)
+		return fmt.Sprintf("Error: %v\n\nPress any key to continue...", m.err)
 	}
 
 	s := strings.Builder{}
 	s.WriteString(titleStyle.Render("FM-CLI"))
 	s.WriteString(" ")
 
-	// Breadcrumbs
-	if (m.state == viewEmails || m.state == viewBody) && len(m.mailboxes) > 0 {
-		mb := m.mailboxes[m.mbCursor]
-		s.WriteString(fmt.Sprintf("> %s", mb.Name))
+	// Show offline indicator
+	if m.offlineMode {
+		s.WriteString("[OFFLINE] ")
+	}
+
+	// Breadcrumbs based on state
+	switch m.state {
+	case viewMailboxes, viewEmails, viewBody, viewComposeTo, viewComposeSubject, viewComposeConfirm:
+		s.WriteString("> Mail")
+		if (m.state == viewEmails || m.state == viewBody) && len(m.mailboxes) > 0 {
+			mb := m.mailboxes[m.mbCursor]
+			s.WriteString(fmt.Sprintf(" > %s", mb.Name))
+		}
+	case viewCalendar:
+		s.WriteString("> Calendar")
+	case viewContacts:
+		s.WriteString("> Contacts")
+	case viewSettings:
+		s.WriteString("> Settings")
 	}
 	s.WriteString("\n\n")
 
-	if m.state == viewMailboxes {
+	// Global shortcuts hint
+	if m.state != viewMainMenu && m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
+		s.WriteString("(1: Mail  2: Calendar  3: Contacts  4: Settings  0: Menu)\n\n")
+	}
+
+	if m.state == viewMainMenu {
+		s.WriteString("Welcome to FM-CLI\n\n")
+		for i, item := range mainMenuItems {
+			cursor := " "
+			style := mailboxStyle
+			if i == m.menuCursor {
+				cursor = ">"
+				style = selectedMailboxStyle
+			}
+			label := fmt.Sprintf("%s [%s] %s", cursor, item.Shortcut, item.Name)
+			s.WriteString(style.Render(label) + "\n")
+		}
+		s.WriteString("\n(j/k navigate, enter to select, q to quit)")
+
+	} else if m.state == viewMailboxes {
 		if m.loading {
 			s.WriteString("Loading mailboxes...")
 		} else if len(m.mailboxes) == 0 {
@@ -904,6 +1062,46 @@ func (m Model) View() string {
 		} else {
 			s.WriteString("\n(y) Send  (s) Save Draft  (n) Cancel  (e) Edit Body  (Tab) Change From")
 		}
+
+	} else if m.state == viewCalendar {
+		s.WriteString("Calendar\n\n")
+		s.WriteString("Coming soon...\n\n")
+		s.WriteString("Calendar integration with Fastmail will allow you to:\n")
+		s.WriteString("  - View your events\n")
+		s.WriteString("  - Create and edit events\n")
+		s.WriteString("  - Manage multiple calendars\n")
+		s.WriteString("\n(0: back to menu)")
+
+	} else if m.state == viewContacts {
+		s.WriteString("Contacts\n\n")
+		s.WriteString("Coming soon...\n\n")
+		s.WriteString("Contacts integration with Fastmail will allow you to:\n")
+		s.WriteString("  - Browse your contacts\n")
+		s.WriteString("  - Add and edit contacts\n")
+		s.WriteString("  - Search contacts\n")
+		s.WriteString("\n(0: back to menu)")
+
+	} else if m.state == viewSettings {
+		s.WriteString("Settings\n\n")
+		
+		offlineStatus := "OFF"
+		if m.offlineMode {
+			offlineStatus = "ON"
+		}
+		
+		settings := []string{
+			fmt.Sprintf("  Offline Mode: %s", offlineStatus),
+		}
+		
+		for i, setting := range settings {
+			cursor := " "
+			if i == m.settingsCursor {
+				cursor = ">"
+			}
+			s.WriteString(fmt.Sprintf("%s%s\n", cursor, setting))
+		}
+		
+		s.WriteString("\n(enter to toggle, 0: back to menu)")
 	}
 
 	return appStyle.Render(s.String())

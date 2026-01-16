@@ -4,6 +4,7 @@ A minimalist, terminal-based user interface (TUI) for Fastmail, built in Go.
 
 ## Features
 
+- **Main Menu**: Quick access to Mail, Calendar, Contacts, and Settings.
 - **Mailbox Navigation**: Browse your folders and see unread counts.
 - **Email Reading**: View threads and read emails (supports Plain Text and HTML-to-Markdown rendering).
 - **Composition**: Write emails using your preferred `$EDITOR` (Vim, Nano, etc.).
@@ -78,14 +79,34 @@ Data is stored in `~/.config/fm-cli/emails.db`.
 
 ### Controls
 
+#### Global Navigation
+| Key | Action |
+| --- | --- |
+| `0` | Return to main menu |
+| `1` | Go to Mail |
+| `2` | Go to Calendar |
+| `3` | Go to Contacts |
+| `4` | Go to Settings |
+| `q` | Quit (from main menu) |
+
+#### Main Menu
+| Key | Action |
+| --- | --- |
+| `j` / `k` (or Arrows) | Navigate up/down |
+| `Enter` / `l` | Select item |
+| `m` | Go to Mail |
+| `c` | Go to Calendar |
+| `o` | Go to Contacts |
+| `s` | Go to Settings |
+
 #### Mailbox List
 | Key | Action |
 | --- | --- |
 | `j` / `k` (or Arrows) | Navigate up/down |
 | `Enter` / `l` | Open mailbox |
+| `h` / `Esc` | Back to main menu |
 | `r` | Refresh |
 | `c` | Compose new email |
-| `q` | Quit |
 
 #### Email List
 | Key | Action |
@@ -125,3 +146,10 @@ Data is stored in `~/.config/fm-cli/emails.db`.
 | `e` | Edit body |
 | `n` | Cancel |
 | `Tab` | Change sending identity |
+
+#### Settings
+| Key | Action |
+| --- | --- |
+| `j` / `k` (or Arrows) | Navigate |
+| `Enter` | Toggle setting |
+| `h` / `Esc` / `0` | Back to main menu |
