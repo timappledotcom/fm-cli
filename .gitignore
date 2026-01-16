@@ -1,0 +1,19 @@
+# Binaries
+fm-cli
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.out
+*.test
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Temporary files created by the app
+fm-cli-*.txt
