@@ -1,0 +1,80 @@
+version: 2
+
+project_name: fm-cli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/fm-cli
+    binary: fm-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+nfpms:
+  - id: packages
+    package_name: fm-cli
+    vendor: Tim Apple
+    homepage: https://github.com/timappledotcom/fm-cli
+    maintainer: Tim Apple
+    description: Terminal-based TUI for Fastmail
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: LICENSE
+        dst: /usr/share/licenses/fm-cli/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/fm-cli/README.md
+
+aurs:
+  - name: fm-cli-bin
+    homepage: https://github.com/timappledotcom/fm-cli
+    description: Terminal-based TUI for Fastmail
+    maintainers:
+      - "Tim Apple"
+    license: MIT
+    private_key: "{{ .Env.AUR_SSH_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/fm-cli-bin.git"
+    package: |-
+      install -Dm755 fm-cli "${pkgdir}/usr/bin/fm-cli"
+      install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/fm-cli/LICENSE"
+      install -Dm644 README.md "${pkgdir}/usr/share/doc/fm-cli/README.md"
+    skip_upload: auto
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: timappledotcom
+    name: fm-cli
+  draft: false
+  prerelease: auto
