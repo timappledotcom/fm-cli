@@ -18,6 +18,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -1535,6 +1536,32 @@ func linkify(text string) string {
 	return reURL.ReplaceAllString(text, "\x1b]8;;$1\x1b\\$1\x1b]8;;\x1b\\")
 }
 
+// renderEmailBody renders the email body with glamour for HTML content
+func renderEmailBody(textBody, htmlBody string, width int) string {
+	// Prefer HTML body if available, render with glamour
+	if htmlBody != "" {
+		// Convert HTML to Markdown-ish text and render with glamour
+		r, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(width),
+		)
+		if err == nil {
+			// glamour can render HTML directly
+			rendered, err := r.Render(htmlBody)
+			if err == nil && strings.TrimSpace(rendered) != "" {
+				return rendered
+			}
+		}
+	}
+	
+	// Fall back to text body with linkify
+	if textBody != "" {
+		return linkify(textBody)
+	}
+	
+	return "(No content)"
+}
+
 func (m Model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n\nPress any key to continue...", m.err)
@@ -1681,8 +1708,8 @@ func (m Model) View() string {
 
 				s.WriteString("--------------------------------------------------\n\n")
 				
-				// Render body with clickable links
-				content := linkify(m.bodyContent)
+				// Render body with glamour for HTML or linkify for plain text
+				content := renderEmailBody(m.bodyContent, m.htmlBody, 80)
 				s.WriteString(content)
 			}
 		}
