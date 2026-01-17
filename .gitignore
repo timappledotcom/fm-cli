@@ -17,3 +17,6 @@ fm-cli
 
 # Temporary files created by the app
 fm-cli-*.txt
+
+# Build artifacts
+dist/
