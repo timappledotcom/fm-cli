@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fm-cli/internal/api"
+	"fm-cli/internal/images"
 	"fm-cli/internal/model"
 	"fm-cli/internal/storage"
 
@@ -84,7 +85,10 @@ var (
 type mailboxesLoadedMsg []model.Mailbox
 type emailsLoadedMsg []model.Email
 type emailsRefreshedMsg []model.Email // For refresh without appending
-type emailBodyLoadedMsg string
+type emailBodyLoadedMsg struct {
+	body     string
+	htmlBody string
+}
 type editorFinishedMsg struct{ err error }
 type emailSentMsg struct{}
 type draftSavedMsg struct{}
@@ -98,6 +102,8 @@ type eventCreatedMsg struct{}
 type eventDeletedMsg struct{}
 type contactCreatedMsg struct{}
 type contactDeletedMsg struct{}
+type htmlBodyLoadedMsg string
+type browserOpenedMsg struct{}
 type errorMsg error
 
 // Main menu items
@@ -134,16 +140,20 @@ type Model struct {
 
 	// Body View Data
 	bodyContent string
-	showDetails bool // Toggle expanded headers
+	htmlBody    string // Raw HTML for image rendering
+	showDetails bool   // Toggle expanded headers
 
 	// Composition Data
-	inputTo      textinput.Model
-	inputSubject textinput.Model
-	composeBody  string
-	tempFile     string
-	draftID      string   // If editing a draft
-	identities   []string // Available sending identities (email addresses)
-	identityIdx  int      // Currently selected identity index
+	inputTo          textinput.Model
+	inputSubject     textinput.Model
+	composeBody      string
+	tempFile         string
+	draftID          string   // If editing a draft
+	identities       []string // Available sending identities (email addresses)
+	identityIdx      int      // Currently selected identity index
+	toSuggestions    []model.Contact // Autocomplete suggestions for To field
+	toSuggestionIdx  int             // Selected suggestion index
+	showSuggestions  bool            // Whether to show suggestions dropdown
 
 	// Calendar Data
 	calendars       []model.Calendar
@@ -265,7 +275,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case emailBodyLoadedMsg:
-		m.bodyContent = string(msg)
+		m.bodyContent = msg.body
+		m.htmlBody = msg.htmlBody
 		m.loading = false
 		return m, nil
 
@@ -277,24 +288,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.state = viewMailboxes
 		os.Remove(m.tempFile)
+		if m.offlineMode || m.client == nil {
+			return m, fetchMailboxesOfflineCmd(m.db)
+		}
 		return m, fetchMailboxesCmd(m.client, m.db)
 
 	case emailSentMsg:
 		m.loading = false
 		m.state = viewMailboxes
 		os.Remove(m.tempFile)
+		if m.offlineMode || m.client == nil {
+			return m, fetchMailboxesOfflineCmd(m.db)
+		}
 		return m, fetchMailboxesCmd(m.client, m.db)
 
 	case emailDeletedMsg:
 		m.loading = false
 		// Refresh mailbox counts after delete
+		if m.offlineMode || m.client == nil {
+			return m, fetchMailboxesOfflineCmd(m.db)
+		}
 		return m, fetchMailboxesCmd(m.client, m.db)
 
 	case calendarsLoadedMsg:
 		m.calendars = msg
 		m.loading = false
 		// Auto-fetch events for visible calendars
-		if len(m.calendars) > 0 && m.client != nil {
+		if len(m.calendars) > 0 && m.client != nil && m.davClient != nil {
 			var calIDs []string
 			for _, cal := range m.calendars {
 				if cal.IsVisible && cal.MayReadItems {
@@ -316,7 +336,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addressBooks = msg
 		m.loading = false
 		// Auto-fetch contacts for default address book
-		if len(m.addressBooks) > 0 && m.client != nil {
+		if len(m.addressBooks) > 0 && m.client != nil && m.davClient != nil {
 			defaultAB := ""
 			for _, ab := range m.addressBooks {
 				if ab.IsDefault && ab.MayReadItems {
@@ -342,7 +362,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editingEvent = nil
 		m.loading = false
 		// Refresh events
-		if len(m.calendars) > 0 && m.client != nil {
+		if len(m.calendars) > 0 && m.client != nil && m.davClient != nil {
 			var calIDs []string
 			for _, cal := range m.calendars {
 				if cal.IsVisible && cal.MayReadItems {
@@ -357,7 +377,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.viewEventDetail = false
 		// Refresh events
-		if len(m.calendars) > 0 && m.client != nil {
+		if len(m.calendars) > 0 && m.client != nil && m.davClient != nil {
 			var calIDs []string
 			for _, cal := range m.calendars {
 				if cal.IsVisible && cal.MayReadItems {
@@ -372,7 +392,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editingContact = nil
 		m.loading = false
 		// Refresh contacts
-		if len(m.addressBooks) > 0 && m.client != nil {
+		if len(m.addressBooks) > 0 && m.client != nil && m.davClient != nil {
 			abID := ""
 			if m.addressBookCursor < len(m.addressBooks) {
 				abID = m.addressBooks[m.addressBookCursor].ID
@@ -385,7 +405,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.viewContactDetail = false
 		// Refresh contacts
-		if len(m.addressBooks) > 0 && m.client != nil {
+		if len(m.addressBooks) > 0 && m.client != nil && m.davClient != nil {
 			abID := ""
 			if m.addressBookCursor < len(m.addressBooks) {
 				abID = m.addressBooks[m.addressBookCursor].ID
@@ -423,10 +443,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editingEvent.Duration = "PT1H"
 				}
 				m.loading = true
-				if m.editingEvent.ID == "" {
+				if m.editingEvent.ID == "" && m.davClient != nil {
 					return m, createEventCmd(m.davClient, *m.editingEvent)
+				} else if m.davClient != nil {
+					return m, updateEventCmd(m.davClient, *m.editingEvent)
 				}
-				return m, updateEventCmd(m.davClient, *m.editingEvent)
 			case tea.KeyEsc:
 				m.editingEvent = nil
 				m.eventInput.Blur()
@@ -531,10 +552,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.loading = true
-				if m.editingContact.ID == "" {
+				if m.editingContact.ID == "" && m.davClient != nil {
 					return m, createContactCmd(m.davClient, *m.editingContact)
+				} else if m.davClient != nil {
+					return m, updateContactCmd(m.davClient, *m.editingContact)
 				}
-				return m, updateContactCmd(m.davClient, *m.editingContact)
 			case tea.KeyEsc:
 				m.editingContact = nil
 				m.contactInput.Blur()
@@ -548,26 +570,80 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Handle Composition States
 	if m.state == viewComposeTo {
+		oldValue := m.inputTo.Value()
 		m.inputTo, cmd = m.inputTo.Update(msg)
+		newValue := m.inputTo.Value()
+		
+		// Update suggestions when input changes
+		if oldValue != newValue && len(newValue) >= 1 {
+			m.toSuggestions = filterContacts(m.contacts, newValue)
+			m.showSuggestions = len(m.toSuggestions) > 0
+			m.toSuggestionIdx = 0
+		} else if newValue == "" {
+			m.toSuggestions = nil
+			m.showSuggestions = false
+		}
 		
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.Type {
+			case tea.KeyDown:
+				if m.showSuggestions && m.toSuggestionIdx < len(m.toSuggestions)-1 {
+					m.toSuggestionIdx++
+					return m, nil
+				}
+			case tea.KeyUp:
+				if m.showSuggestions && m.toSuggestionIdx > 0 {
+					m.toSuggestionIdx--
+					return m, nil
+				}
 			case tea.KeyEnter:
+				if m.showSuggestions && len(m.toSuggestions) > 0 {
+					// Select the suggestion
+					selected := m.toSuggestions[m.toSuggestionIdx]
+					if len(selected.Emails) > 0 {
+						if selected.FullName != "" {
+							m.inputTo.SetValue(fmt.Sprintf("%s <%s>", selected.FullName, selected.Emails[0].Email))
+						} else {
+							m.inputTo.SetValue(selected.Emails[0].Email)
+						}
+					}
+					m.showSuggestions = false
+					m.toSuggestions = nil
+					return m, nil
+				}
 				m.state = viewComposeSubject
 				m.inputTo.Blur()
 				m.inputSubject.Focus()
+				m.showSuggestions = false
 				return m, textinput.Blink
 			case tea.KeyTab:
+				if m.showSuggestions && len(m.toSuggestions) > 0 {
+					// Tab also selects suggestion
+					selected := m.toSuggestions[m.toSuggestionIdx]
+					if len(selected.Emails) > 0 {
+						if selected.FullName != "" {
+							m.inputTo.SetValue(fmt.Sprintf("%s <%s>", selected.FullName, selected.Emails[0].Email))
+						} else {
+							m.inputTo.SetValue(selected.Emails[0].Email)
+						}
+					}
+					m.showSuggestions = false
+					m.toSuggestions = nil
+					return m, nil
+				}
 				if len(m.identities) > 1 {
 					m.identityIdx = (m.identityIdx + 1) % len(m.identities)
 				}
 				return m, nil
 			case tea.KeyEsc:
+				if m.showSuggestions {
+					m.showSuggestions = false
+					return m, nil
+				}
 				m.state = viewMailboxes
 				m.inputTo.Blur()
 				return m, nil
-			// Global Quit check (optional here or fallthrough? better usually global first)
 			case tea.KeyCtrlC:
 				return m, tea.Quit
 			}
@@ -699,7 +775,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
 				m.state = viewMailboxes
 				m.loading = true
-				if m.offlineMode {
+				if m.offlineMode || m.client == nil {
 					return m, fetchMailboxesOfflineCmd(m.db)
 				}
 				return m, fetchMailboxesCmd(m.client, m.db)
@@ -708,7 +784,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Go to Calendar
 			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
 				m.state = viewCalendar
-				if len(m.calendars) == 0 && m.client != nil && !m.offlineMode {
+				if len(m.calendars) == 0 && m.client != nil && !m.offlineMode && m.davClient != nil {
 					m.loading = true
 					return m, fetchCalendarsCmd(m.davClient)
 				}
@@ -718,9 +794,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Go to Contacts
 			if m.state != viewComposeTo && m.state != viewComposeSubject && m.state != viewComposeConfirm {
 				m.state = viewContacts
-				if len(m.addressBooks) == 0 && m.client != nil && !m.offlineMode {
+				m.contactCursor = 0 // Reset cursor
+				if len(m.addressBooks) == 0 && m.client != nil && !m.offlineMode && m.davClient != nil {
 					m.loading = true
 					return m, fetchAddressBooksCmd(m.davClient)
+				} else if len(m.addressBooks) > 0 && len(m.contacts) == 0 && m.davClient != nil && !m.offlineMode {
+					// Address books loaded but no contacts yet - fetch them
+					m.loading = true
+					defaultAB := m.addressBooks[0].ID
+					for _, ab := range m.addressBooks {
+						if ab.IsDefault {
+							defaultAB = ab.ID
+							break
+						}
+					}
+					return m, fetchContactsCmd(m.davClient, defaultAB, 100)
 				}
 				return m, nil
 			}
@@ -733,6 +821,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "d", "backspace":
 			if m.state == viewEmails && len(m.emails) > 0 {
+				if m.offlineMode {
+					m.err = fmt.Errorf("cannot delete emails in offline mode")
+					return m, nil
+				}
+				if m.client == nil {
+					m.err = fmt.Errorf("not connected")
+					return m, nil
+				}
 				m.loading = true
 				selectedEmail := m.emails[m.emailCursor]
 				// Optimistic UI update
@@ -745,7 +841,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, deleteEmailCmd(m.client, selectedEmail.ID)
-			} else if m.state == viewCalendar && len(m.events) > 0 && !m.offlineMode {
+			} else if m.state == viewCalendar && len(m.events) > 0 && !m.offlineMode && m.davClient != nil {
 				if m.viewEventDetail || m.editingEvent == nil {
 					m.loading = true
 					eventID := m.events[m.eventCursor].ID
@@ -761,7 +857,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewEventDetail = false
 					return m, deleteEventCmd(m.davClient, eventID)
 				}
-			} else if m.state == viewContacts && len(m.contacts) > 0 && !m.offlineMode {
+			} else if m.state == viewContacts && len(m.contacts) > 0 && !m.offlineMode && m.davClient != nil {
 				if m.viewContactDetail || m.editingContact == nil {
 					m.loading = true
 					contactID := m.contacts[m.contactCursor].ID
@@ -877,7 +973,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inputTo.SetValue("")
 			m.inputSubject.SetValue("")
 			m.composeBody = ""
+			m.showSuggestions = false
+			m.toSuggestions = nil
 			m.inputTo.Focus()
+			// Fetch contacts for autocomplete if not already loaded
+			if m.davClient != nil && !m.offlineMode {
+				if len(m.addressBooks) == 0 {
+					// Need to fetch address books first, then contacts
+					return m, tea.Batch(textinput.Blink, fetchAddressBooksCmd(m.davClient))
+				} else if len(m.contacts) == 0 {
+					defaultAB := m.addressBooks[0].ID
+					for _, ab := range m.addressBooks {
+						if ab.IsDefault {
+							defaultAB = ab.ID
+							break
+						}
+					}
+					return m, tea.Batch(textinput.Blink, fetchContactsCmd(m.davClient, defaultAB, 100))
+				}
+			}
 			return m, textinput.Blink
 
 		case "R": // Reply to sender
@@ -964,10 +1078,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.state == viewMainMenu {
 				m.state = viewMailboxes
 				m.loading = true
-				if m.offlineMode {
+				if m.offlineMode || m.client == nil {
 					return m, fetchMailboxesOfflineCmd(m.db)
 				}
 				return m, fetchMailboxesCmd(m.client, m.db)
+			}
+
+		case "b":
+			// Open email in browser
+			if m.state == viewBody && m.htmlBody != "" {
+				return m, openInBrowserCmd(m.htmlBody)
+			}
+
+		case "i":
+			// Render images inline (Sixel/Kitty/iTerm2)
+			if m.state == viewBody && m.htmlBody != "" {
+				return m, renderImagesCmd(m.htmlBody)
 			}
 
 		case "up", "k":
@@ -975,10 +1101,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.menuCursor > 0 {
 					m.menuCursor--
 				}
+				return m, nil
 			} else if m.state == viewMailboxes {
 				if m.mbCursor > 0 {
 					m.mbCursor--
 				}
+				return m, nil
 			} else if m.state == viewEmails {
 				if m.emailCursor > 0 {
 					m.emailCursor--
@@ -986,18 +1114,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.emailOffset = m.emailCursor
 					}
 				}
+				return m, nil
 			} else if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil {
 				if m.eventCursor > 0 {
 					m.eventCursor--
 				}
+				return m, nil
 			} else if m.state == viewContacts && !m.viewContactDetail && m.editingContact == nil {
 				if m.contactCursor > 0 {
 					m.contactCursor--
 				}
+				return m, nil
 			} else if m.state == viewSettings {
 				if m.settingsCursor > 0 {
 					m.settingsCursor--
 				}
+				return m, nil
 			}
 
 		case "down", "j":
@@ -1005,10 +1137,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.menuCursor < len(mainMenuItems)-1 {
 					m.menuCursor++
 				}
+				return m, nil
 			} else if m.state == viewMailboxes {
 				if m.mbCursor < len(m.mailboxes)-1 {
 					m.mbCursor++
 				}
+				return m, nil
 			} else if m.state == viewEmails {
 				// Dynamic page height
 				headerHeight := 5
@@ -1026,20 +1160,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.canLoadMore && !m.loading {
 					m.loading = true
 					selectedMB := m.mailboxes[m.mbCursor]
+					if m.offlineMode || m.client == nil {
+						return m, fetchEmailsOfflineCmd(m.db, selectedMB.ID, len(m.emails))
+					}
 					return m, fetchEmailsCmd(m.client, m.db, selectedMB.ID, len(m.emails))
 				}
+				return m, nil
 			} else if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil {
 				if m.eventCursor < len(m.events)-1 {
 					m.eventCursor++
 				}
+				return m, nil
 			} else if m.state == viewContacts && !m.viewContactDetail && m.editingContact == nil {
 				if m.contactCursor < len(m.contacts)-1 {
 					m.contactCursor++
 				}
+				return m, nil
 			} else if m.state == viewSettings {
-				if m.settingsCursor > 0 {
-					m.settingsCursor--
+				if m.settingsCursor < 1 { // Only 1 setting currently
+					m.settingsCursor++
 				}
+				return m, nil
 			}
 
 		case "enter", "right", "l":
@@ -1049,16 +1190,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = selectedItem.State
 				if selectedItem.State == viewMailboxes {
 					m.loading = true
-					if m.offlineMode {
+					if m.offlineMode || m.client == nil {
 						return m, fetchMailboxesOfflineCmd(m.db)
 					}
 					return m, fetchMailboxesCmd(m.client, m.db)
-				} else if selectedItem.State == viewCalendar && !m.offlineMode && m.client != nil {
+				} else if selectedItem.State == viewCalendar && !m.offlineMode && m.client != nil && m.davClient != nil {
 					m.loading = true
-					return m, fetchCalendarsCmd(m.davClient)
-				} else if selectedItem.State == viewContacts && !m.offlineMode && m.client != nil {
+					if len(m.calendars) == 0 {
+						return m, fetchCalendarsCmd(m.davClient)
+					}
+					// Calendars already loaded, fetch events
+					var calIDs []string
+					for _, cal := range m.calendars {
+						if cal.IsVisible && cal.MayReadItems {
+							calIDs = append(calIDs, cal.ID)
+						}
+					}
+					if len(calIDs) > 0 {
+						start := time.Now()
+						end := start.AddDate(0, 0, m.agendaDays)
+						return m, fetchEventsCmd(m.davClient, calIDs, start, end)
+					}
+				} else if selectedItem.State == viewContacts && !m.offlineMode && m.client != nil && m.davClient != nil {
 					m.loading = true
-					return m, fetchAddressBooksCmd(m.davClient)
+					m.contactCursor = 0
+					if len(m.addressBooks) == 0 {
+						return m, fetchAddressBooksCmd(m.davClient)
+					}
+					// Address books loaded, fetch contacts if needed
+					if len(m.contacts) == 0 {
+						defaultAB := m.addressBooks[0].ID
+						for _, ab := range m.addressBooks {
+							if ab.IsDefault {
+								defaultAB = ab.ID
+								break
+							}
+						}
+						return m, fetchContactsCmd(m.davClient, defaultAB, 100)
+					}
+					m.loading = false
 				}
 				return m, nil
 			} else if m.state == viewMailboxes && len(m.mailboxes) > 0 {
@@ -1069,12 +1239,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading = true
 				m.canLoadMore = true
 				selectedMB := m.mailboxes[m.mbCursor]
+				if m.offlineMode || m.client == nil {
+					return m, fetchEmailsOfflineCmd(m.db, selectedMB.ID, 0)
+				}
 				return m, fetchEmailsCmd(m.client, m.db, selectedMB.ID, 0)
 			} else if m.state == viewEmails && len(m.emails) > 0 {
 				// Always go to preview first, even for drafts
 				m.state = viewBody
 				m.loading = true
 				selectedEmail := m.emails[m.emailCursor]
+				if m.offlineMode || m.client == nil {
+					return m, fetchEmailBodyOfflineCmd(m.db, selectedEmail.ID)
+				}
 				return m, fetchEmailBodyCmd(m.client, m.db, selectedEmail.ID)
 			} else if m.state == viewCalendar && !m.viewEventDetail && m.editingEvent == nil && len(m.events) > 0 {
 				// View event details
@@ -1107,10 +1283,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = viewMailboxes
 				m.emails = nil
 				// Refresh mailbox counts when returning
+				if m.offlineMode || m.client == nil {
+					return m, fetchMailboxesOfflineCmd(m.db)
+				}
 				return m, fetchMailboxesCmd(m.client, m.db)
 			} else if m.state == viewBody {
 				m.state = viewEmails
 				m.bodyContent = ""
+				m.htmlBody = ""
 			} else if m.state == viewCalendar {
 				if m.viewEventDetail {
 					m.viewEventDetail = false
@@ -1138,12 +1318,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Manual refresh
 			if m.state == viewMailboxes {
 				m.loading = true
+				if m.offlineMode || m.client == nil {
+					return m, fetchMailboxesOfflineCmd(m.db)
+				}
 				return m, fetchMailboxesCmd(m.client, m.db)
 			} else if m.state == viewEmails && len(m.mailboxes) > 0 {
 				m.loading = true
 				selectedMB := m.mailboxes[m.mbCursor]
+				if m.offlineMode || m.client == nil {
+					return m, tea.Batch(fetchMailboxesOfflineCmd(m.db), fetchEmailsOfflineCmd(m.db, selectedMB.ID, 0))
+				}
 				return m, tea.Batch(fetchMailboxesCmd(m.client, m.db), refreshEmailsCmd(m.client, m.db, selectedMB.ID))
-			} else if m.state == viewCalendar && !m.offlineMode && m.client != nil {
+			} else if m.state == viewCalendar && !m.offlineMode && m.client != nil && m.davClient != nil {
 				m.loading = true
 				var calIDs []string
 				for _, cal := range m.calendars {
@@ -1152,7 +1338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, fetchEventsCmd(m.davClient, calIDs, m.agendaStart, m.agendaStart.AddDate(0, 0, m.agendaDays))
-			} else if m.state == viewContacts && !m.offlineMode && m.client != nil {
+			} else if m.state == viewContacts && !m.offlineMode && m.client != nil && m.davClient != nil {
 				m.loading = true
 				abID := ""
 				if m.addressBookCursor < len(m.addressBooks) {
@@ -1230,7 +1416,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 
 	case emailBodyLoadedMsg:
-		m.bodyContent = string(msg)
+		m.bodyContent = msg.body
+		m.htmlBody = msg.htmlBody
 		m.loading = false
 		
 		// If we are loading a draft to edit:
@@ -1246,7 +1433,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The fetchEmailBody returns converted text.
 			// Ideally we want raw textBody from API.
 			// Current API `FetchEmailBody` tries text then html->text.
-			body := string(msg)
+			body := msg.body
 			if strings.HasPrefix(body, "[Converted HTML]\n") {
 				body = strings.TrimPrefix(body, "[Converted HTML]\n")
 			}
@@ -1287,6 +1474,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// filterContacts returns contacts matching the search query
+func filterContacts(contacts []model.Contact, query string) []model.Contact {
+	if query == "" {
+		return nil
+	}
+	query = strings.ToLower(query)
+	var matches []model.Contact
+	for _, c := range contacts {
+		// Match against name or email
+		if strings.Contains(strings.ToLower(c.FullName), query) {
+			matches = append(matches, c)
+			continue
+		}
+		for _, e := range c.Emails {
+			if strings.Contains(strings.ToLower(e.Email), query) {
+				matches = append(matches, c)
+				break
+			}
+		}
+		if len(matches) >= 5 { // Limit suggestions
+			break
+		}
+	}
+	return matches
 }
 
 // Helper to make links clickable (OSC 8)
@@ -1474,9 +1687,14 @@ func (m Model) View() string {
 			}
 		}
 		
-		help := "\n\n(h/esc: back, R: reply, A: reply all, F: forward, m: toggle details)"
+		help := "\n\n(h/esc: back, R: reply, A: reply all, F: forward, m: toggle details, b: browser"
+		if images.HasGraphicsSupport() {
+			help += ", i: images)"
+		} else {
+			help += ")"
+		}
 		if len(m.emails) > m.emailCursor && m.emails[m.emailCursor].IsDraft {
-			help = "\n\n(h/esc: back, e: edit draft, m: toggle details)"
+			help = "\n\n(h/esc: back, e: edit draft, m: toggle details, b: browser)"
 		}
 		s.WriteString(help)
 
@@ -1488,7 +1706,29 @@ func (m Model) View() string {
 		}
 		s.WriteString("From: " + fromAddr + "  [Tab to change]\n")
 		s.WriteString("To: " + m.inputTo.View() + "\n")
-		s.WriteString("\n(Enter to continue, Tab to cycle From, Esc to cancel)")
+		
+		// Show autocomplete suggestions
+		if m.showSuggestions && len(m.toSuggestions) > 0 {
+			s.WriteString("\n")
+			for i, c := range m.toSuggestions {
+				cursor := "  "
+				if i == m.toSuggestionIdx {
+					cursor = "> "
+				}
+				email := ""
+				if len(c.Emails) > 0 {
+					email = c.Emails[0].Email
+				}
+				if c.FullName != "" {
+					s.WriteString(fmt.Sprintf("%s%s <%s>\n", cursor, c.FullName, email))
+				} else {
+					s.WriteString(fmt.Sprintf("%s%s\n", cursor, email))
+				}
+			}
+			s.WriteString("\n(↑/↓ select, Tab/Enter to use, Esc to dismiss)")
+		} else {
+			s.WriteString("\n(Enter to continue, Tab to cycle From, Esc to cancel)")
+		}
 
 	} else if m.state == viewComposeSubject {
 		s.WriteString("Compose New Email\n\n")
@@ -1575,7 +1815,14 @@ func (m Model) View() string {
 			s.WriteString("No events in the next " + fmt.Sprintf("%d", m.agendaDays) + " days.\n")
 			s.WriteString("\n(n: new event, r: refresh, esc: back)")
 		} else if len(m.calendars) == 0 {
-			s.WriteString("No calendars found. Make sure you have calendars in Fastmail.\n")
+			if m.offlineMode {
+				s.WriteString("Calendar is not available in offline mode.\n")
+			} else if m.davClient == nil {
+				s.WriteString("Calendar requires an app password to be configured.\n")
+				s.WriteString("Set FM_APP_PASSWORD environment variable.\n")
+			} else {
+				s.WriteString("No calendars found. Make sure you have calendars in Fastmail.\n")
+			}
 			s.WriteString("\n(r: refresh, esc: back)")
 		} else {
 			// Agenda view
@@ -1706,25 +1953,60 @@ func (m Model) View() string {
 			s.WriteString("No contacts found.\n")
 			s.WriteString("\n(n: new contact, r: refresh, esc: back)")
 		} else if len(m.addressBooks) == 0 {
-			s.WriteString("No address books found.\n")
+			if m.offlineMode {
+				s.WriteString("Contacts are not available in offline mode.\n")
+			} else if m.davClient == nil {
+				s.WriteString("Contacts require an app password to be configured.\n")
+				s.WriteString("Set FM_APP_PASSWORD environment variable.\n")
+			} else {
+				s.WriteString("No address books found.\n")
+			}
 			s.WriteString("\n(r: refresh, esc: back)")
 		} else {
-			// Contact list
-			for i, c := range m.contacts {
-				cursor := " "
+			// Contact list with count
+			s.WriteString(fmt.Sprintf("Showing %d contacts\n\n", len(m.contacts)))
+			
+			// Calculate visible window
+			headerHeight := 4
+			footerHeight := 2
+			pageHeight := m.height - headerHeight - footerHeight
+			if pageHeight < 5 {
+				pageHeight = 10
+			}
+			
+			startIdx := 0
+			if m.contactCursor >= pageHeight {
+				startIdx = m.contactCursor - pageHeight + 1
+			}
+			endIdx := startIdx + pageHeight
+			if endIdx > len(m.contacts) {
+				endIdx = len(m.contacts)
+			}
+			
+			for i := startIdx; i < endIdx; i++ {
+				c := m.contacts[i]
+				cursor := "  "
 				style := emailItemStyle
 				if i == m.contactCursor {
-					cursor = ">"
+					cursor = "> "
 					style = selectedEmailItemStyle
 				}
 				
-				line := fmt.Sprintf("%s %s", cursor, c.FullName)
-				if len(c.Emails) > 0 {
-					line += fmt.Sprintf(" <%s>", c.Emails[0].Email)
+				// Format: Name <email> | phone
+				line := c.FullName
+				if line == "" {
+					line = "(No name)"
 				}
-				s.WriteString(style.Render(line) + "\n")
+				if len(c.Emails) > 0 {
+					line += fmt.Sprintf("  <%s>", c.Emails[0].Email)
+				}
+				if len(c.Phones) > 0 {
+					line += fmt.Sprintf("  %s", c.Phones[0].Number)
+				}
+				
+				s.WriteString(style.Render(cursor + line) + "\n")
 			}
-			s.WriteString("\n(j/k navigate, enter: view, n: new, d: delete, r: refresh)")
+			s.WriteString("\n(j/k: navigate, enter: view, n: new, d: delete, r: refresh, esc: back)")
 		}
 
 	} else if m.state == viewSettings {
@@ -1864,6 +2146,19 @@ func fetchEmailsCmd(client *api.Client, db *storage.DB, mailboxID string, offset
 		// Save to local storage if available
 		if db != nil {
 			db.SaveEmails(emails)
+			// Pre-fetch and cache email bodies in background for offline access
+			go func() {
+				for _, email := range emails {
+					// Check if body already cached
+					existingBody, _ := db.GetEmailBody(email.ID)
+					if existingBody == "" || strings.HasPrefix(existingBody, "[Full email body not cached") || strings.HasPrefix(existingBody, "[Email body not available") {
+						body, err := client.FetchEmailBody(email.ID)
+						if err == nil && body != "" {
+							db.SaveEmailBody(email.ID, body)
+						}
+					}
+				}
+			}()
 		}
 		return emailsLoadedMsg(emails)
 	}
@@ -1890,6 +2185,19 @@ func refreshEmailsCmd(client *api.Client, db *storage.DB, mailboxID string) tea.
 		}
 		if db != nil {
 			db.SaveEmails(emails)
+			// Pre-fetch and cache email bodies in background for offline access
+			go func() {
+				for _, email := range emails {
+					// Check if body already cached
+					existingBody, _ := db.GetEmailBody(email.ID)
+					if existingBody == "" || strings.HasPrefix(existingBody, "[Full email body not cached") || strings.HasPrefix(existingBody, "[Email body not available") {
+						body, err := client.FetchEmailBody(email.ID)
+						if err == nil && body != "" {
+							db.SaveEmailBody(email.ID, body)
+						}
+					}
+				}
+			}()
 		}
 		return emailsRefreshedMsg(emails)
 	}
@@ -1901,11 +2209,16 @@ func fetchEmailBodyCmd(client *api.Client, db *storage.DB, emailID string) tea.C
 		if err != nil {
 			return errorMsg(err)
 		}
+		// Also fetch HTML body for image rendering
+		htmlBody, _ := client.FetchEmailHTMLBody(emailID)
 		// Save body to local storage
 		if db != nil {
 			db.SaveEmailBody(emailID, body)
+			if htmlBody != "" {
+				db.SaveEmailHTMLBody(emailID, htmlBody)
+			}
 		}
-		return emailBodyLoadedMsg(body)
+		return emailBodyLoadedMsg{body: body, htmlBody: htmlBody}
 	}
 }
 
@@ -1918,7 +2231,49 @@ func fetchEmailBodyOfflineCmd(db *storage.DB, emailID string) tea.Cmd {
 		if err != nil {
 			return errorMsg(err)
 		}
-		return emailBodyLoadedMsg(body)
+		htmlBody, _ := db.GetEmailHTMLBody(emailID)
+		return emailBodyLoadedMsg{body: body, htmlBody: htmlBody}
+	}
+}
+
+func openInBrowserCmd(htmlBody string) tea.Cmd {
+	return func() tea.Msg {
+		err := images.OpenHTMLInBrowser(htmlBody)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return browserOpenedMsg{}
+	}
+}
+
+func renderImagesCmd(htmlBody string) tea.Cmd {
+	return func() tea.Msg {
+		// Check for graphics support
+		if !images.HasGraphicsSupport() {
+			// Fall back to browser
+			err := images.OpenHTMLInBrowser(htmlBody)
+			if err != nil {
+				return errorMsg(err)
+			}
+			return browserOpenedMsg{}
+		}
+
+		// Extract and render images
+		imgs := images.ExtractImagesFromHTML(htmlBody)
+		if len(imgs) == 0 {
+			return errorMsg(fmt.Errorf("no images found in email"))
+		}
+
+		// Render each image
+		for _, img := range imgs {
+			if img.URL != "" && !strings.HasPrefix(img.URL, "cid:") {
+				rendered, err := images.RenderImageFromURL(img.URL, 80, 40)
+				if err == nil && rendered != "" {
+					fmt.Print(rendered)
+				}
+			}
+		}
+		return browserOpenedMsg{}
 	}
 }
 

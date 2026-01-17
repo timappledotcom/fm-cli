@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export CGO_ENABLED = 1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build -ldflags "-s -w" -o fm-cli ./cmd/fm-cli
+
+override_dh_auto_install:
+	install -Dm755 fm-cli debian/fm-cli/usr/bin/fm-cli
+	install -Dm644 README.md debian/fm-cli/usr/share/doc/fm-cli/README.md
+
+override_dh_auto_test:
+	# Skip tests for now

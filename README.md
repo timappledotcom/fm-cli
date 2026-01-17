@@ -2,98 +2,177 @@
 
 A minimalist, terminal-based user interface (TUI) for Fastmail, built in Go.
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Go Version](https://img.shields.io/badge/go-1.21+-00ADD8.svg)
+
 ## Features
 
-- **Main Menu**: Quick access to Mail, Calendar, Contacts, and Settings.
-- **Mailbox Navigation**: Browse your folders and see unread counts.
-- **Email Reading**: View threads and read emails (supports Plain Text and HTML-to-Markdown rendering).
-- **Composition**: Write emails using your preferred `$EDITOR` (Vim, Nano, etc.).
-- **Multiple Identities**: Select from your configured Fastmail sending addresses.
-- **Reply & Forward**: Reply to sender, reply all, or forward emails with quoted content.
-- **Draft Management**: Save, edit, and send drafts.
-- **Email Actions**: Mark read/unread, flag, archive, and delete emails.
-- **Calendar**: View upcoming events in an agenda view, create and edit events (via CalDAV).
-- **Contacts**: Browse your address book, add and edit contacts (via CardDAV).
-- **Pagination**: Infinite scroll through large mailboxes.
-- **Auto-Refresh**: Automatic sync with server after actions.
-- **Offline Mode**: Store emails locally for offline access. Drafts created offline sync when back online.
-- **Clickable Links**: Supports OSC 8 hyperlinks for supported terminals.
-- **Detailed Headers**: Toggle expanded email headers.
-- **Secure Auth**: Stores your credentials securely in the system keyring.
+### Email
+- **Mailbox Navigation**: Browse your folders with unread counts
+- **Email Reading**: Plain text and HTML-to-Markdown rendering with clickable links
+- **Composition**: Write emails using your preferred `$EDITOR` (Vim, Nano, etc.)
+- **Contact Autocomplete**: Type in the To field and get suggestions from your address book
+- **Multiple Identities**: Select from your configured Fastmail sending addresses
+- **Reply & Forward**: Reply to sender, reply all, or forward with quoted content
+- **Draft Management**: Save, edit, and send drafts
+- **Email Actions**: Mark read/unread, flag, archive, and delete
+- **Inline Images**: View images in terminal (Sixel/Kitty/iTerm2) or open in browser
+- **Pagination**: Infinite scroll through large mailboxes
+
+### Calendar
+- **Agenda View**: See upcoming events for the next 7 days
+- **Event Management**: Create, edit, and delete events
+- **CalDAV Integration**: Syncs with Fastmail calendars
+
+### Contacts
+- **Address Book**: Browse and search your contacts
+- **Contact Management**: Create, edit, and delete contacts
+- **CardDAV Integration**: Syncs with Fastmail address books
+
+### Offline Mode
+- **Local Storage**: Emails cached in SQLite for offline reading
+- **Full Body Caching**: Email bodies pre-fetched for complete offline access
+- **Offline Drafts**: Compose emails offline, sync when back online
+- **Pending Actions**: Changes queued and synced automatically
+
+### Other Features
+- **Secure Auth**: Credentials stored in system keyring
+- **OSC 8 Links**: Clickable hyperlinks in supported terminals
+- **Detailed Headers**: Toggle expanded email headers
+- **Auto-Refresh**: Automatic sync after actions
 
 ## Installation
 
-### Prerequisites
+### From Package Manager
 
-- Go 1.25+
-- A Fastmail account with:
-  - An **API Token** (for email access via JMAP)
-  - An **App Password** (optional, for calendar/contacts via CalDAV/CardDAV)
-- CGO enabled (for SQLite support in offline mode)
+#### Arch Linux (AUR)
+```bash
+yay -S fm-cli
+# or
+paru -S fm-cli
+```
 
-### Build
+#### Debian/Ubuntu
+```bash
+# Download the .deb package from releases
+sudo dpkg -i fm-cli_0.2.0_amd64.deb
+```
 
+#### Fedora/RHEL
+```bash
+# Download the .rpm package from releases
+sudo rpm -i fm-cli-0.2.0-1.x86_64.rpm
+```
+
+### From Source
+
+#### Prerequisites
+- Go 1.21+
+- CGO enabled (for SQLite support)
+- A Fastmail account
+
+#### Build
 ```bash
 git clone https://github.com/timappledotcom/fm-cli.git
 cd fm-cli
-go build ./cmd/fm-cli
+go build -o fm-cli ./cmd/fm-cli
+sudo mv fm-cli /usr/local/bin/
 ```
 
+## Configuration
+
+### Quick Start
+
+1. **Get your Fastmail credentials** (see below)
+2. **Run the login wizard**:
+   ```bash
+   fm-cli login
+   ```
+3. **Start the app**:
+   ```bash
+   fm-cli
+   ```
+
+### Getting Your Fastmail Credentials
+
+#### API Token (Required - for email)
+
+1. Log in to [Fastmail](https://www.fastmail.com)
+2. Go to **Settings** → **Privacy & Security** → **Integrations** → **API Tokens**
+3. Click **New API Token**
+4. Give it a name (e.g., "fm-cli")
+5. Select permissions: **Mail** (read/write) and **Submission**
+6. Copy the generated token
+
+#### App Password (Optional - for calendar/contacts)
+
+1. Go to **Settings** → **Privacy & Security** → **Integrations** → **App Passwords**
+2. Click **New App Password**
+3. Select **Mail, Contacts & Calendars** access
+4. Give it a name (e.g., "fm-cli-dav")
+5. Copy the generated password
+
+> **Note**: The App Password uses CalDAV/CardDAV protocols which require separate authentication from the JMAP API token.
+
+### Environment Variables (Alternative)
+
+Instead of using the login command, you can set environment variables:
+
+```bash
+export FM_API_TOKEN="your-api-token"
+export FM_EMAIL="you@fastmail.com"
+export FM_APP_PASSWORD="your-app-password"  # Optional
+```
+
+### Data Storage
+
+- **Credentials**: Stored securely in your system keyring
+- **Offline data**: `~/.config/fm-cli/emails.db` (SQLite)
+
 ## Usage
-
-1. **Login**:
-   ```bash
-   ./fm-cli login
-   ```
-   You will be prompted for:
-   - Your Fastmail email address
-   - Your API Token (required for email)
-   - Your App Password (optional, enables calendar/contacts)
-
-2. **Run**:
-   ```bash
-   ./fm-cli
-   ```
-
-### Getting Your Credentials
-
-1. **API Token** (for email):
-   - Go to Fastmail Settings → Privacy & Security → Integrations → API Tokens
-   - Create a new token with Mail and Submission permissions
-
-2. **App Password** (for calendar/contacts):
-   - Go to Fastmail Settings → Privacy & Security → Integrations → App Passwords
-   - Create a new password with "Mail, Contacts & Calendars" access
-   - This uses CalDAV/CardDAV protocols which require a separate app password
 
 ### Commands
 
 | Command | Description |
 | --- | --- |
 | `fm-cli` | Start the TUI |
-| `fm-cli login` | Store API token in system keychain |
-| `fm-cli logout` | Remove API token from keychain |
-| `fm-cli settings` | View/modify settings |
+| `fm-cli login` | Store credentials in system keychain |
+| `fm-cli logout` | Remove credentials from keychain |
+| `fm-cli settings` | View current settings |
 | `fm-cli settings offline on` | Enable offline mode |
 | `fm-cli settings offline off` | Disable offline mode |
 | `fm-cli sync` | Sync pending offline changes |
+| `fm-cli debug` | Show debug info (JMAP session, CalDAV/CardDAV status) |
 | `fm-cli help` | Show help |
 
 ### Offline Mode
 
-Enable offline mode to store emails locally:
+Enable offline mode to cache emails locally:
 
 ```bash
-./fm-cli settings offline on
+fm-cli settings offline on
 ```
 
-When offline mode is enabled:
-- Emails and mailboxes are cached locally in SQLite
-- You can read cached emails without internet
-- Drafts created offline are queued for sync
-- Run `fm-cli sync` when back online to push changes
+When enabled:
+- Emails and mailboxes are cached in SQLite
+- Email bodies are pre-fetched for complete offline reading
+- Read cached emails without internet
+- Compose drafts offline (queued for sync)
+- Run `fm-cli sync` to push pending changes
 
-Data is stored in `~/.config/fm-cli/emails.db`.
+### Inline Images
+
+When viewing an email with images:
+- Press `b` to open the email in your browser
+- Press `i` to render images inline (requires Sixel/Kitty/iTerm2 terminal support)
+
+Supported terminals for inline images:
+- Kitty
+- iTerm2
+- WezTerm
+- Foot
+- mlterm
+- Any terminal with Sixel support
 
 ### Controls
 
@@ -147,14 +226,17 @@ Data is stored in `~/.config/fm-cli/emails.db`.
 | `A` | Reply all |
 | `F` | Forward |
 | `m` | Toggle detailed headers |
+| `b` | Open in browser |
+| `i` | View inline images (if terminal supports) |
 | `e` | Edit (drafts only) |
 
 #### Compose
 | Key | Action |
 | --- | --- |
-| `Tab` | Cycle through sending identities |
-| `Enter` | Continue to next field / Open editor |
-| `Esc` | Cancel / Go back |
+| `↑` / `↓` | Navigate contact suggestions |
+| `Tab` | Select suggestion / Cycle identities |
+| `Enter` | Select suggestion / Continue to next field |
+| `Esc` | Dismiss suggestions / Cancel |
 
 #### Send Confirmation
 | Key | Action |
@@ -206,3 +288,48 @@ Data is stored in `~/.config/fm-cli/emails.db`.
 | `j` / `k` (or Arrows) | Navigate |
 | `Enter` | Toggle setting |
 | `h` / `Esc` / `0` | Back to main menu |
+
+## Troubleshooting
+
+### "No calendars found" or "No address books found"
+- Make sure you've configured an App Password (not just the API Token)
+- Run `fm-cli debug` to check CalDAV/CardDAV connection status
+- The App Password must have "Mail, Contacts & Calendars" permission
+
+### "Calendar/Contacts not available in offline mode"
+- Calendar and Contacts require an internet connection
+- Only email supports offline mode currently
+
+### Crashes when switching modes
+- If you started in offline mode but want to go online, restart the app
+- The JMAP client is only initialized at startup
+
+### Images not displaying inline
+- Your terminal must support Sixel, Kitty graphics, or iTerm2 inline images
+- Use `b` to open in browser as a fallback
+
+## Building Packages
+
+### Debian/Ubuntu (.deb)
+```bash
+./scripts/build-deb.sh
+```
+
+### Fedora/RHEL (.rpm)
+```bash
+./scripts/build-rpm.sh
+```
+
+### Arch Linux (PKGBUILD)
+```bash
+cd packaging/archlinux
+makepkg -si
+```
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.

@@ -1,0 +1,16 @@
+Source: fm-cli
+Section: mail
+Priority: optional
+Maintainer: Tim Apple <tim@example.com>
+Build-Depends: debhelper (>= 11), golang-go (>= 1.21), libsqlite3-dev
+Standards-Version: 4.5.0
+Homepage: https://github.com/timappledotcom/fm-cli
+
+Package: fm-cli
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: libsecret-1-0
+Description: Terminal-based TUI for Fastmail
+ FM-Cli is a minimalist, terminal-based user interface for Fastmail.
+ Features include email reading/composing, calendar management,
+ contacts, offline mode, and secure credential storage.

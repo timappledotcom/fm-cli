@@ -1,0 +1,32 @@
+# Maintainer: Tim Apple <tim@example.com>
+pkgname=fm-cli
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="A minimalist terminal-based TUI for Fastmail"
+arch=('x86_64' 'aarch64')
+url="https://github.com/timappledotcom/fm-cli"
+license=('MIT')
+depends=('glibc')
+makedepends=('go>=1.21' 'git')
+optdepends=(
+    'libsecret: for system keyring support'
+    'gnome-keyring: for GNOME keyring support'
+    'kwallet: for KDE wallet support'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    export CGO_ENABLED=1
+    export GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
+    go build -ldflags "-linkmode external -extldflags \"$LDFLAGS\" -s -w -X main.version=$pkgver" \
+        -o $pkgname ./cmd/fm-cli
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 $pkgname "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

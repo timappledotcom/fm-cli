@@ -17,43 +17,37 @@ import (
 	"github.com/emersion/go-webdav/carddav"
 )
 
-// Fastmail DAV endpoints
-const (
-	FastmailCalDAVURL  = "https://caldav.fastmail.com/"
-	FastmailCardDAVURL = "https://carddav.fastmail.com/"
-)
-
 // DAVClient holds CalDAV and CardDAV clients
 type DAVClient struct {
-	CalDAV  *caldav.Client
-	CardDAV *carddav.Client
-	email   string
+	CalDAV       *caldav.Client
+	CardDAV      *carddav.Client
+	httpClient   webdav.HTTPClient
+	email        string
 }
 
 // NewDAVClient creates CalDAV/CardDAV clients with app password auth
 func NewDAVClient(email, appPassword string) (*DAVClient, error) {
-	httpClient := &http.Client{
-		Transport: &basicAuthTransport{
-			username: email,
-			password: appPassword,
-			base:     http.DefaultTransport,
-		},
-	}
+	httpClient := webdav.HTTPClientWithBasicAuth(nil, email, appPassword)
 
-	calClient, err := caldav.NewClient(webdav.HTTPClientWithBasicAuth(httpClient, email, appPassword), FastmailCalDAVURL)
+	// Fastmail CalDAV/CardDAV endpoints with principal path
+	calURL := "https://caldav.fastmail.com/dav/principals/user/" + email + "/"
+	cardURL := "https://carddav.fastmail.com/dav/principals/user/" + email + "/"
+
+	calClient, err := caldav.NewClient(httpClient, calURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CalDAV client: %w", err)
 	}
 
-	cardClient, err := carddav.NewClient(webdav.HTTPClientWithBasicAuth(httpClient, email, appPassword), FastmailCardDAVURL)
+	cardClient, err := carddav.NewClient(httpClient, cardURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CardDAV client: %w", err)
 	}
 
 	return &DAVClient{
-		CalDAV:  calClient,
-		CardDAV: cardClient,
-		email:   email,
+		CalDAV:     calClient,
+		CardDAV:    cardClient,
+		httpClient: httpClient,
+		email:      email,
 	}, nil
 }
 
@@ -70,7 +64,7 @@ func (t *basicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 // FetchCalendars retrieves all calendars via CalDAV
 func (d *DAVClient) FetchCalendars(ctx context.Context) ([]model.Calendar, error) {
-	// Find calendar home set
+	// Use principal discovery
 	principal, err := d.CalDAV.FindCurrentUserPrincipal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find principal: %w", err)
@@ -91,7 +85,7 @@ func (d *DAVClient) FetchCalendars(ctx context.Context) ([]model.Calendar, error
 		calendars = append(calendars, model.Calendar{
 			ID:             cal.Path,
 			Name:           cal.Name,
-			Color:          "", // caldav.Calendar doesn't have Color field
+			Color:          "",
 			IsVisible:      true,
 			IsDefault:      i == 0,
 			MayReadItems:   true,
@@ -370,6 +364,7 @@ func (d *DAVClient) DeleteEvent(ctx context.Context, eventPath string) error {
 
 // FetchAddressBooks retrieves all address books via CardDAV
 func (d *DAVClient) FetchAddressBooks(ctx context.Context) ([]model.AddressBook, error) {
+	// Use principal discovery
 	principal, err := d.CardDAV.FindCurrentUserPrincipal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find principal: %w", err)
@@ -587,20 +582,30 @@ func parseAddressObject(obj carddav.AddressObject, abPath string) *model.Contact
 func (d *DAVClient) CreateContact(ctx context.Context, contact model.Contact) (string, error) {
 	card := make(vcard.Card)
 
+	// VERSION must be set first for vCard 3.0
+	card.SetValue(vcard.FieldVersion, "3.0")
+
 	uid := fmt.Sprintf("%d@fm-cli", time.Now().UnixNano())
 	card.SetValue(vcard.FieldUID, uid)
-	card.SetValue(vcard.FieldFormattedName, contact.FullName)
-
-	// Name components
-	if contact.FirstName != "" || contact.LastName != "" {
-		name := &vcard.Name{
-			FamilyName:      contact.LastName,
-			GivenName:       contact.FirstName,
-			HonorificPrefix: contact.Prefix,
-			HonorificSuffix: contact.Suffix,
-		}
-		card.AddName(name)
+	
+	// FN (Formatted Name) is required
+	fn := contact.FullName
+	if fn == "" {
+		fn = strings.TrimSpace(contact.FirstName + " " + contact.LastName)
 	}
+	if fn == "" {
+		fn = "New Contact"
+	}
+	card.SetValue(vcard.FieldFormattedName, fn)
+
+	// N (Name) is required in vCard 3.0 - must have all components even if empty
+	name := &vcard.Name{
+		FamilyName:      contact.LastName,
+		GivenName:       contact.FirstName,
+		HonorificPrefix: contact.Prefix,
+		HonorificSuffix: contact.Suffix,
+	}
+	card.AddName(name)
 
 	if contact.Nickname != "" {
 		card.SetValue(vcard.FieldNickname, contact.Nickname)
@@ -614,6 +619,9 @@ func (d *DAVClient) CreateContact(ctx context.Context, contact model.Contact) (s
 
 	// Emails
 	for _, email := range contact.Emails {
+		if email.Email == "" {
+			continue
+		}
 		field := &vcard.Field{
 			Value:  email.Email,
 			Params: make(vcard.Params),
@@ -626,6 +634,9 @@ func (d *DAVClient) CreateContact(ctx context.Context, contact model.Contact) (s
 
 	// Phones
 	for _, phone := range contact.Phones {
+		if phone.Number == "" {
+			continue
+		}
 		field := &vcard.Field{
 			Value:  phone.Number,
 			Params: make(vcard.Params),
@@ -648,8 +659,6 @@ func (d *DAVClient) CreateContact(ctx context.Context, contact model.Contact) (s
 	if contact.Birthday != "" {
 		card.SetValue(vcard.FieldBirthday, contact.Birthday)
 	}
-
-	card.SetValue(vcard.FieldVersion, "3.0")
 
 	path := contact.AddressBookID + uid + ".vcf"
 	_, err := d.CardDAV.PutAddressObject(ctx, path, card)

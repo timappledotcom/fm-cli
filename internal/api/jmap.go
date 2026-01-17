@@ -281,6 +281,37 @@ func (c *Client) FetchEmailBody(emailID string) (string, error) {
 	return "", fmt.Errorf("email not found")
 }
 
+// FetchEmailHTMLBody returns the raw HTML body of an email for image rendering
+func (c *Client) FetchEmailHTMLBody(emailID string) (string, error) {
+	req := &jmap.Request{}
+	g := &email.Get{
+		Account:             c.getMailAccountID(),
+		IDs:                 []jmap.ID{jmap.ID(emailID)},
+		Properties:          []string{"bodyValues", "htmlBody"},
+		FetchHTMLBodyValues: true,
+	}
+	req.Invoke(g)
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Email/get failed: %w", err)
+	}
+
+	for _, inv := range resp.Responses {
+		if res, ok := inv.Args.(*email.GetResponse); ok {
+			if len(res.List) > 0 {
+				e := res.List[0]
+				for _, part := range e.HTMLBody {
+					if val, ok := e.BodyValues[part.PartID]; ok {
+						return val.Value, nil
+					}
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no HTML body found")
+}
+
 // GetMailboxIDByRole finds a mailbox ID by its role (e.g., "drafts", "sent").
 func (c *Client) GetMailboxIDByRole(role string) (string, error) {
 mbs, err := c.FetchMailboxes()

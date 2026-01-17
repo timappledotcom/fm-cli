@@ -296,23 +296,47 @@ func (d *DB) GetEmails(mailboxID string, offset, limit int) ([]model.Email, erro
 	return emails, rows.Err()
 }
 
-// GetEmailBody retrieves the body of an email
+// GetEmailBody retrieves the body of an email, falling back to preview if body not available
 func (d *DB) GetEmailBody(emailID string) (string, error) {
 	var body sql.NullString
-	err := d.db.QueryRow("SELECT body_text FROM emails WHERE id = ?", emailID).Scan(&body)
+	var preview sql.NullString
+	err := d.db.QueryRow("SELECT body_text, preview FROM emails WHERE id = ?", emailID).Scan(&body, &preview)
 	if err != nil {
 		return "", err
 	}
-	if body.Valid {
+	if body.Valid && body.String != "" {
 		return body.String, nil
 	}
-	return "", nil
+	// Fall back to preview if body not available
+	if preview.Valid && preview.String != "" {
+		return "[Full email body not cached - showing preview]\n\n" + preview.String, nil
+	}
+	return "[Email body not available offline]", nil
 }
 
 // SaveEmailBody saves the body of an email
 func (d *DB) SaveEmailBody(emailID, body string) error {
 	_, err := d.db.Exec("UPDATE emails SET body_text = ? WHERE id = ?", body, emailID)
 	return err
+}
+
+// SaveEmailHTMLBody saves the HTML body of an email
+func (d *DB) SaveEmailHTMLBody(emailID, htmlBody string) error {
+	_, err := d.db.Exec("UPDATE emails SET body_html = ? WHERE id = ?", htmlBody, emailID)
+	return err
+}
+
+// GetEmailHTMLBody retrieves the HTML body of an email
+func (d *DB) GetEmailHTMLBody(emailID string) (string, error) {
+	var htmlBody sql.NullString
+	err := d.db.QueryRow("SELECT body_html FROM emails WHERE id = ?", emailID).Scan(&htmlBody)
+	if err != nil {
+		return "", err
+	}
+	if !htmlBody.Valid || htmlBody.String == "" {
+		return "", nil
+	}
+	return htmlBody.String, nil
 }
 
 // AddPendingAction adds an action to sync later
