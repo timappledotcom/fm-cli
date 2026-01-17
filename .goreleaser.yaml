@@ -40,6 +40,7 @@ nfpms:
     formats:
       - deb
       - rpm
+      - archlinux
     contents:
       - src: LICENSE
         dst: /usr/share/licenses/fm-cli/LICENSE
