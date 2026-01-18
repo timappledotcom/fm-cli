@@ -18,7 +18,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -1536,25 +1535,58 @@ func linkify(text string) string {
 	return reURL.ReplaceAllString(text, "\x1b]8;;$1\x1b\\$1\x1b]8;;\x1b\\")
 }
 
-// renderEmailBody renders the email body with glamour for HTML content
+// stripHTML removes HTML tags and decodes common entities
+func stripHTML(html string) string {
+	// Remove style and script blocks entirely
+	reStyle := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	html = reStyle.ReplaceAllString(html, "")
+	reScript := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	html = reScript.ReplaceAllString(html, "")
+	
+	// Replace common block elements with newlines
+	reBlock := regexp.MustCompile(`(?i)</(p|div|tr|li|h[1-6])>`)
+	html = reBlock.ReplaceAllString(html, "\n")
+	reBr := regexp.MustCompile(`(?i)<br\s*/?>`)
+	html = reBr.ReplaceAllString(html, "\n")
+	
+	// Remove all remaining tags
+	reTags := regexp.MustCompile(`<[^>]+>`)
+	html = reTags.ReplaceAllString(html, "")
+	
+	// Decode common HTML entities
+	html = strings.ReplaceAll(html, "&nbsp;", " ")
+	html = strings.ReplaceAll(html, "&amp;", "&")
+	html = strings.ReplaceAll(html, "&lt;", "<")
+	html = strings.ReplaceAll(html, "&gt;", ">")
+	html = strings.ReplaceAll(html, "&quot;", "\"")
+	html = strings.ReplaceAll(html, "&#39;", "'")
+	html = strings.ReplaceAll(html, "&apos;", "'")
+	
+	// Collapse multiple newlines/spaces
+	reSpaces := regexp.MustCompile(`[ \t]+`)
+	html = reSpaces.ReplaceAllString(html, " ")
+	reNewlines := regexp.MustCompile(`\n{3,}`)
+	html = reNewlines.ReplaceAllString(html, "\n\n")
+	
+	return strings.TrimSpace(html)
+}
+
+// renderEmailBody renders the email body, converting HTML to plain text
 func renderEmailBody(textBody, htmlBody string, width int) string {
-	// Prefer HTML body if available, render with glamour
+	// If we have clean text body, prefer it
+	if textBody != "" && !strings.HasPrefix(textBody, "[Converted HTML]") {
+		return linkify(textBody)
+	}
+	
+	// For HTML content, convert to plain text
 	if htmlBody != "" {
-		// Convert HTML to Markdown-ish text and render with glamour
-		r, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(width),
-		)
-		if err == nil {
-			// glamour can render HTML directly
-			rendered, err := r.Render(htmlBody)
-			if err == nil && strings.TrimSpace(rendered) != "" {
-				return rendered
-			}
+		text := stripHTML(htmlBody)
+		if text != "" {
+			return linkify(text)
 		}
 	}
 	
-	// Fall back to text body with linkify
+	// Fall back to text body with linkify (even if it's converted HTML)
 	if textBody != "" {
 		return linkify(textBody)
 	}
