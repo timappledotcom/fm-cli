@@ -1636,14 +1636,27 @@ func stripHTMLFallback(htmlContent string) string {
 
 // renderEmailBody renders the email body, converting HTML to plain text
 func renderEmailBody(textBody, htmlBody string, width int) string {
-	// If we have clean text body, prefer it
-	if textBody != "" && !strings.HasPrefix(textBody, "[Converted HTML]") {
+	// Check if textBody looks like HTML (contains HTML tags)
+	isHTMLBody := strings.Contains(textBody, "<html") || 
+		strings.Contains(textBody, "<table") || 
+		strings.Contains(textBody, "<div") ||
+		strings.Contains(textBody, "<td") ||
+		strings.Contains(textBody, "<!DOCTYPE")
+	
+	// If we have clean text body (not HTML), prefer it
+	if textBody != "" && !strings.HasPrefix(textBody, "[Converted HTML]") && !isHTMLBody {
 		return linkify(textBody)
 	}
 	
 	// For HTML content, convert to plain text
-	if htmlBody != "" {
-		text := htmlToText(htmlBody)
+	// Try htmlBody first, then textBody if it's HTML
+	contentToConvert := htmlBody
+	if contentToConvert == "" && isHTMLBody {
+		contentToConvert = textBody
+	}
+	
+	if contentToConvert != "" {
+		text := htmlToText(contentToConvert)
 		if text != "" {
 			return linkify(text)
 		}
