@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/net/html"
 )
 
 // SessionState indicates the current view
@@ -1535,40 +1536,102 @@ func linkify(text string) string {
 	return reURL.ReplaceAllString(text, "\x1b]8;;$1\x1b\\$1\x1b]8;;\x1b\\")
 }
 
-// stripHTML removes HTML tags and decodes common entities
-func stripHTML(html string) string {
+// htmlToText converts HTML to readable plain text using a proper parser
+func htmlToText(htmlContent string) string {
+	doc, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		return stripHTMLFallback(htmlContent)
+	}
+	
+	var buf strings.Builder
+	var extractText func(*html.Node)
+	
+	extractText = func(n *html.Node) {
+		// Skip style, script, head elements entirely
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "style", "script", "head", "noscript":
+				return
+			case "br":
+				buf.WriteString("\n")
+				return
+			case "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote":
+				buf.WriteString("\n")
+			case "td", "th":
+				buf.WriteString(" ")
+			}
+		}
+		
+		if n.Type == html.TextNode {
+			text := strings.TrimSpace(n.Data)
+			if text != "" {
+				buf.WriteString(text)
+				buf.WriteString(" ")
+			}
+		}
+		
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			extractText(c)
+		}
+		
+		// Add newline after block elements
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote":
+				buf.WriteString("\n")
+			}
+		}
+	}
+	
+	extractText(doc)
+	
+	result := buf.String()
+	
+	// Clean up whitespace
+	reSpaces := regexp.MustCompile(`[ \t]+`)
+	result = reSpaces.ReplaceAllString(result, " ")
+	reNewlines := regexp.MustCompile(`\n[ \t]+`)
+	result = reNewlines.ReplaceAllString(result, "\n")
+	reMultiNewlines := regexp.MustCompile(`\n{3,}`)
+	result = reMultiNewlines.ReplaceAllString(result, "\n\n")
+	
+	// Remove zero-width characters often used in spam
+	result = strings.ReplaceAll(result, "\u200b", "") // zero-width space
+	result = strings.ReplaceAll(result, "\u200c", "") // zero-width non-joiner
+	result = strings.ReplaceAll(result, "\u200d", "") // zero-width joiner
+	result = strings.ReplaceAll(result, "\ufeff", "") // BOM
+	
+	return strings.TrimSpace(result)
+}
+
+// stripHTMLFallback is a simple regex-based fallback
+func stripHTMLFallback(htmlContent string) string {
 	// Remove style and script blocks entirely
 	reStyle := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	html = reStyle.ReplaceAllString(html, "")
+	htmlContent = reStyle.ReplaceAllString(htmlContent, "")
 	reScript := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
-	html = reScript.ReplaceAllString(html, "")
+	htmlContent = reScript.ReplaceAllString(htmlContent, "")
 	
 	// Replace common block elements with newlines
 	reBlock := regexp.MustCompile(`(?i)</(p|div|tr|li|h[1-6])>`)
-	html = reBlock.ReplaceAllString(html, "\n")
+	htmlContent = reBlock.ReplaceAllString(htmlContent, "\n")
 	reBr := regexp.MustCompile(`(?i)<br\s*/?>`)
-	html = reBr.ReplaceAllString(html, "\n")
+	htmlContent = reBr.ReplaceAllString(htmlContent, "\n")
 	
 	// Remove all remaining tags
 	reTags := regexp.MustCompile(`<[^>]+>`)
-	html = reTags.ReplaceAllString(html, "")
+	htmlContent = reTags.ReplaceAllString(htmlContent, "")
 	
 	// Decode common HTML entities
-	html = strings.ReplaceAll(html, "&nbsp;", " ")
-	html = strings.ReplaceAll(html, "&amp;", "&")
-	html = strings.ReplaceAll(html, "&lt;", "<")
-	html = strings.ReplaceAll(html, "&gt;", ">")
-	html = strings.ReplaceAll(html, "&quot;", "\"")
-	html = strings.ReplaceAll(html, "&#39;", "'")
-	html = strings.ReplaceAll(html, "&apos;", "'")
+	htmlContent = html.UnescapeString(htmlContent)
 	
-	// Collapse multiple newlines/spaces
+	// Collapse whitespace
 	reSpaces := regexp.MustCompile(`[ \t]+`)
-	html = reSpaces.ReplaceAllString(html, " ")
+	htmlContent = reSpaces.ReplaceAllString(htmlContent, " ")
 	reNewlines := regexp.MustCompile(`\n{3,}`)
-	html = reNewlines.ReplaceAllString(html, "\n\n")
+	htmlContent = reNewlines.ReplaceAllString(htmlContent, "\n\n")
 	
-	return strings.TrimSpace(html)
+	return strings.TrimSpace(htmlContent)
 }
 
 // renderEmailBody renders the email body, converting HTML to plain text
@@ -1580,7 +1643,7 @@ func renderEmailBody(textBody, htmlBody string, width int) string {
 	
 	// For HTML content, convert to plain text
 	if htmlBody != "" {
-		text := stripHTML(htmlBody)
+		text := htmlToText(htmlBody)
 		if text != "" {
 			return linkify(text)
 		}
